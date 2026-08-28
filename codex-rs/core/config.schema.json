@@ -805,6 +805,9 @@
             "non_prefixed_mcp_tool_names": {
               "$ref": "#/definitions/FeatureToml_for_NonPrefixedMcpToolNamesConfigToml"
             },
+            "omit_app_server_notification_media": {
+              "type": "boolean"
+            },
             "personality": {
               "type": "boolean"
             },
@@ -5957,6 +5960,9 @@
         },
         "non_prefixed_mcp_tool_names": {
           "$ref": "#/definitions/FeatureToml_for_NonPrefixedMcpToolNamesConfigToml"
+        },
+        "omit_app_server_notification_media": {
+          "type": "boolean"
         },
         "personality": {
           "type": "boolean"
