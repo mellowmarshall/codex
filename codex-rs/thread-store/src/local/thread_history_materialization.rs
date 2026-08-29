@@ -16,6 +16,8 @@ use super::thread_history::RolloutProjectionStep;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
+const PROJECTION_READ_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+
 pub(super) async fn materialize_to_sqlite(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -24,8 +26,26 @@ pub(super) async fn materialize_to_sqlite(
     if store.state_db.is_none() {
         return Ok(());
     }
-    let projection_state = super::thread_history::projection_state(store, thread_id).await?;
-    let start_offset = projection_state
+    let mut projection_state = super::thread_history::projection_state(store, thread_id).await?;
+    if let Some(state) = projection_state.as_ref()
+        && tokio::fs::metadata(rollout_path)
+            .await
+            .map_err(thread_store_io_error)?
+            .len()
+            < state.next_byte_offset
+    {
+        warn!(
+            thread_id = %thread_id,
+            rollout_path = %rollout_path.display(),
+            projected_byte_offset = state.next_byte_offset,
+            "rebuilding thread history projection after durable rollout replacement"
+        );
+        // The projection is a rebuildable view. Clear its rows and checkpoint together so stale
+        // payloads from the replaced rollout cannot survive while the canonical JSONL is replayed.
+        super::thread_history::delete_thread(store, thread_id).await?;
+        projection_state = None;
+    }
+    let mut start_offset = projection_state
         .as_ref()
         .map_or(0, |state| state.next_byte_offset);
     if projection_state.is_none()
@@ -43,30 +63,34 @@ pub(super) async fn materialize_to_sqlite(
         .history_base
         .map_or(0, |base| base.end_ordinal_exclusive);
     let subagent_history_start_ordinal = session_meta.subagent_history_start_ordinal;
-    let expected_ordinal = projection_state
+    let mut expected_ordinal = projection_state
         .as_ref()
         .map_or(initial_ordinal, |state| state.next_ordinal);
-    let (projections, next_offset) = read_projection_steps(
-        rollout_path,
-        start_offset,
-        expected_ordinal,
-        thread_id,
-        subagent_history_start_ordinal,
-    )
-    .await?;
-    // Empty valid records can still consume bytes through blank complete lines.
-    if projections.is_empty() && start_offset == next_offset {
-        return Ok(());
+    loop {
+        let (projections, next_offset, next_ordinal) = read_projection_steps(
+            rollout_path,
+            start_offset,
+            expected_ordinal,
+            thread_id,
+            subagent_history_start_ordinal,
+        )
+        .await?;
+        // Empty valid records can still consume bytes through blank complete lines.
+        if start_offset == next_offset {
+            return Ok(());
+        }
+        super::thread_history::apply_projection(
+            store,
+            thread_id,
+            start_offset,
+            next_offset,
+            initial_ordinal,
+            projections,
+        )
+        .await?;
+        start_offset = next_offset;
+        expected_ordinal = next_ordinal;
     }
-    super::thread_history::apply_projection(
-        store,
-        thread_id,
-        start_offset,
-        next_offset,
-        initial_ordinal,
-        projections,
-    )
-    .await
 }
 
 async fn read_projection_steps(
@@ -75,11 +99,11 @@ async fn read_projection_steps(
     expected_ordinal: u64,
     thread_id: ThreadId,
     subagent_history_start_ordinal: Option<u64>,
-) -> ThreadStoreResult<(Vec<RolloutProjectionStep>, u64)> {
+) -> ThreadStoreResult<(Vec<RolloutProjectionStep>, u64, u64)> {
     let file_end_offset = match tokio::fs::metadata(rollout_path).await {
         Ok(metadata) => metadata.len(),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && start_offset == 0 => {
-            return Ok((Vec::new(), 0));
+            return Ok((Vec::new(), 0, expected_ordinal));
         }
         Err(err) => return Err(thread_store_io_error(err)),
     };
@@ -89,10 +113,12 @@ async fn read_projection_steps(
             .ok_or_else(|| ThreadStoreError::Internal {
                 message: "durable rollout shrank before projection".to_string(),
             })?;
-    let byte_count = usize::try_from(byte_count).map_err(|_| ThreadStoreError::Internal {
-        message: "durable rollout append exceeds addressable memory".to_string(),
-    })?;
-    let mut bytes = vec![0; byte_count];
+    let batch_byte_count = byte_count.min(PROJECTION_READ_BATCH_BYTES);
+    let batch_byte_count =
+        usize::try_from(batch_byte_count).map_err(|_| ThreadStoreError::Internal {
+            message: "durable rollout append exceeds addressable memory".to_string(),
+        })?;
+    let mut bytes = vec![0; batch_byte_count];
     let mut file = tokio::fs::File::open(rollout_path)
         .await
         .map_err(thread_store_io_error)?;
@@ -108,6 +134,13 @@ async fn read_projection_steps(
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |index| index + 1);
+    if complete_byte_count == 0 && byte_count > PROJECTION_READ_BATCH_BYTES {
+        return Err(ThreadStoreError::Internal {
+            message: format!(
+                "paginated rollout line for {thread_id} exceeds the {PROJECTION_READ_BATCH_BYTES}-byte projection limit"
+            ),
+        });
+    }
     let mut projections = Vec::new();
     let mut next_ordinal = expected_ordinal;
     let mut next_offset = start_offset;
@@ -186,6 +219,24 @@ async fn read_projection_steps(
             }
         };
         if ordinal < next_ordinal {
+            // Older writers could durably append a retry after SQLite committed the same ordinal.
+            // A retry of the immediately preceding ordinal is already covered by the ordinal
+            // cursor, whether the first write was committed in this batch or an earlier one.
+            // Advance past it without replaying its changes, but reject older out-of-order data.
+            if ordinal.checked_add(1) == Some(next_ordinal) && pending_rejected_line_count == 0 {
+                warn!(
+                    thread_id = %thread_id,
+                    rollout_path = %rollout_path.display(),
+                    line_start_byte_offset = line_start_offset,
+                    line_end_byte_offset = line_end_offset,
+                    expected_ordinal = next_ordinal,
+                    line_ordinal = ordinal,
+                    "skipping already-projected rollout retry"
+                );
+                next_offset = line_end_offset;
+                line_start_offset = line_end_offset;
+                continue;
+            }
             return Err(ThreadStoreError::Internal {
                 message: format!(
                     "thread history projection for {thread_id} expected ordinal {next_ordinal}, got {ordinal}"
@@ -281,7 +332,7 @@ async fn read_projection_steps(
         next_offset = line_end_offset;
         line_start_offset = line_end_offset;
     }
-    Ok((projections, next_offset))
+    Ok((projections, next_offset, next_ordinal))
 }
 
 fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {

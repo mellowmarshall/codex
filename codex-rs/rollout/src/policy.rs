@@ -31,10 +31,37 @@ pub fn persisted_rollout_items(
     let mut persisted = Vec::new();
     for item in items {
         if is_persisted_rollout_item(item, history_mode) {
-            persisted.push(item.clone());
+            let mut item = item.clone();
+            remove_redundant_generated_image_result(&mut item);
+            persisted.push(item);
         }
     }
     persisted
+}
+
+fn remove_redundant_generated_image_result(item: &mut RolloutItem) {
+    let RolloutItem::EventMsg(event) = item else {
+        return;
+    };
+    match event {
+        EventMsg::ItemCompleted(event) => match &mut event.item {
+            TurnItem::Extension(ExtensionItem::ImageGeneration(image))
+                if image.status == "completed" && image.saved_path.is_some() =>
+            {
+                image.result.clear();
+            }
+            TurnItem::ImageGeneration(image) if image.saved_path.is_some() => {
+                image.result.clear();
+            }
+            _ => {}
+        },
+        EventMsg::ImageGenerationEnd(event)
+            if event.status == "completed" && event.saved_path.is_some() =>
+        {
+            event.result.clear();
+        }
+        _ => {}
+    }
 }
 
 /// Whether a `ResponseItem` should be persisted in rollout files.
@@ -196,3 +223,7 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::CollabResumeBegin(_) => false,
     }
 }
+
+#[cfg(test)]
+#[path = "policy_tests.rs"]
+mod tests;
