@@ -42,18 +42,18 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
         "retained-codex-rmcp-client-info"
     );
     tracing::trace!(target: "codex_http_client::transport", "dropped-request-body");
-    tracing::debug!(target: "codex_http_client::transport", "retained-request-diagnostic");
+    tracing::debug!(target: "codex_http_client::transport", "dropped-request-debug");
     tracing::trace!(target: "codex_api::sse", "dropped-sse-parent");
     tracing::trace!(target: "codex_api::sse::responses", "dropped-sse-payload");
-    tracing::debug!(target: "codex_api::sse::responses", "retained-sse-diagnostic");
-    tracing::trace!(target: "codex_state", "retained-trace");
+    tracing::debug!(target: "codex_api::sse::responses", "dropped-sse-debug");
+    tracing::trace!(target: "codex_state", "dropped-codex-trace");
     tracing::trace!(
         target: "codex_tui::streaming::controller",
         "dropped-controller-trace"
     );
     tracing::debug!(
         target: "codex_tui::streaming::controller",
-        "retained-controller-debug"
+        "dropped-controller-debug"
     );
     tracing::trace!(
         target: "codex_tui::streaming::table_holdback",
@@ -61,11 +61,11 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
     );
     tracing::debug!(
         target: "codex_tui::streaming::table_holdback",
-        "retained-table-holdback-debug"
+        "dropped-table-holdback-debug"
     );
     tracing::trace!(
         target: "codex_tui::streaming::commit_tick",
-        "retained-commit-tick-trace"
+        "dropped-commit-tick-trace"
     );
     tracing::trace!(
         target: "codex_api::responses_websocket_timing",
@@ -96,32 +96,6 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
                 "INFO",
                 "codex_rmcp_client::oauth",
                 Some("retained-codex-rmcp-client-info")
-            ),
-            (
-                "DEBUG",
-                "codex_http_client::transport",
-                Some("retained-request-diagnostic")
-            ),
-            (
-                "DEBUG",
-                "codex_api::sse::responses",
-                Some("retained-sse-diagnostic")
-            ),
-            ("TRACE", "codex_state", Some("retained-trace")),
-            (
-                "DEBUG",
-                "codex_tui::streaming::controller",
-                Some("retained-controller-debug"),
-            ),
-            (
-                "DEBUG",
-                "codex_tui::streaming::table_holdback",
-                Some("retained-table-holdback-debug"),
-            ),
-            (
-                "TRACE",
-                "codex_tui::streaming::commit_tick",
-                Some("retained-commit-tick-trace"),
             ),
         ]
     );

@@ -52,7 +52,10 @@ const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(10);
 
 pub fn default_filter() -> Targets {
     Targets::new()
-        .with_default(LevelFilter::TRACE)
+        // The SQLite sink is a bounded support log, not a full tracing recorder.
+        // Persisting DEBUG and TRACE events across many long-lived processes can
+        // grow the shared database by gigabytes and duplicate streamed payloads.
+        .with_default(LevelFilter::INFO)
         .with_target("hyper_util", LevelFilter::WARN)
         .with_target("log", LevelFilter::OFF)
         // SQLite warnings must not feed back into the same SQLite log writer.
@@ -64,13 +67,12 @@ pub fn default_filter() -> Targets {
         .with_target("rmcp", LevelFilter::INFO)
         .with_target("codex_api::responses_websocket_timing", LevelFilter::OFF)
         .with_target("codex_core::post_sampling_token_estimate", LevelFilter::OFF)
-        // Full model request bodies and streamed response payloads overwhelm the
-        // SQLite log database, but remain available to explicit TRACE subscribers.
-        .with_target("codex_http_client::transport", LevelFilter::DEBUG)
-        .with_target("codex_api::sse", LevelFilter::DEBUG)
-        // Per-chunk streaming traces otherwise flood the bounded SQLite log queue.
-        .with_target("codex_tui::streaming::controller", LevelFilter::DEBUG)
-        .with_target("codex_tui::streaming::table_holdback", LevelFilter::DEBUG)
+        // Full model request bodies, streamed response payloads, and per-chunk
+        // rendering events remain available to explicit non-SQLite subscribers.
+        .with_target("codex_http_client::transport", LevelFilter::INFO)
+        .with_target("codex_api::sse", LevelFilter::INFO)
+        .with_target("codex_tui::streaming::controller", LevelFilter::INFO)
+        .with_target("codex_tui::streaming::table_holdback", LevelFilter::INFO)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
