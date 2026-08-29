@@ -153,6 +153,14 @@ impl SqliteConfig {
             .unwrap_or_else(|| LOGS_DB.path(self.home()))
     }
 
+    fn runtime_db_path(&self, spec: RuntimeDbSpec) -> PathBuf {
+        if spec.filename == LOGS_DB_FILENAME {
+            self.logs_db_path()
+        } else {
+            spec.path(self.home())
+        }
+    }
+
     /// Return the path to the goals database.
     pub fn goals_db_path(&self) -> PathBuf {
         GOALS_DB.path(self.home())
@@ -179,11 +187,7 @@ impl SqliteConfig {
             .iter()
             .map(|spec| RuntimeDbPath {
                 label: spec.label,
-                path: if spec.filename == LOGS_DB_FILENAME {
-                    self.logs_db_path()
-                } else {
-                    spec.path(self.home())
-                },
+                path: self.runtime_db_path(*spec),
             })
             .collect()
     }
@@ -251,7 +255,7 @@ impl SqliteConfig {
         migrator: &Migrator,
         telemetry_override: Option<&dyn DbTelemetry>,
     ) -> anyhow::Result<SqlitePool> {
-        let path = spec.path(self.home());
+        let path = self.runtime_db_path(spec);
         let started = Instant::now();
         let pool_result = self
             .open_read_write_pool(&path)
@@ -325,5 +329,27 @@ impl SqliteConfig {
             .max_connections(1)
             .connect_with(options)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_db_path_uses_the_override_only_for_logs() {
+        let home_path = std::env::temp_dir().join("codex-state-home");
+        let logs_path = std::env::temp_dir().join("codex-runtime-logs.sqlite");
+        let config = SqliteConfig {
+            sqlite_home: AbsolutePathBuf::try_from(home_path.clone())
+                .expect("temporary directory is absolute"),
+            logs_db_path: Some(logs_path.clone()),
+        };
+
+        assert_eq!(config.runtime_db_path(LOGS_DB), logs_path);
+        assert_eq!(
+            config.runtime_db_path(STATE_DB),
+            home_path.join(STATE_DB_FILENAME)
+        );
     }
 }
