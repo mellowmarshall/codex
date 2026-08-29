@@ -32,6 +32,7 @@ const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
 const QUEUE_DB_FILENAME: &str = "queue_1.sqlite";
 const STATE_DB_FILENAME: &str = "state_5.sqlite";
 const THREAD_HISTORY_DB_FILENAME: &str = "thread_history_1.sqlite";
+const LOGS_DB_PATH_ENV: &str = "CODEX_LOGS_DB_PATH";
 
 #[derive(Clone, Copy)]
 struct RuntimeDbSpec {
@@ -115,15 +116,25 @@ pub struct RuntimeDbPath {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SqliteConfig {
     sqlite_home: AbsolutePathBuf,
+    logs_db_path: Option<PathBuf>,
 }
 
 impl SqliteConfig {
     pub fn from_sqlite_home(sqlite_home: AbsolutePathBuf) -> Self {
-        Self { sqlite_home }
+        let logs_db_path = std::env::var_os(LOGS_DB_PATH_ENV)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute());
+        Self {
+            sqlite_home,
+            logs_db_path,
+        }
     }
 
     pub fn new_for_testing(sqlite_home: AbsolutePathBuf) -> Self {
-        Self::from_sqlite_home(sqlite_home)
+        Self {
+            sqlite_home,
+            logs_db_path: None,
+        }
     }
 
     pub fn home(&self) -> &Path {
@@ -137,7 +148,17 @@ impl SqliteConfig {
 
     /// Return the path to the logs database.
     pub fn logs_db_path(&self) -> PathBuf {
-        LOGS_DB.path(self.home())
+        self.logs_db_path
+            .clone()
+            .unwrap_or_else(|| LOGS_DB.path(self.home()))
+    }
+
+    fn runtime_db_path(&self, spec: RuntimeDbSpec) -> PathBuf {
+        if spec.filename == LOGS_DB_FILENAME {
+            self.logs_db_path()
+        } else {
+            spec.path(self.home())
+        }
     }
 
     /// Return the path to the goals database.
@@ -166,7 +187,7 @@ impl SqliteConfig {
             .iter()
             .map(|spec| RuntimeDbPath {
                 label: spec.label,
-                path: spec.path(self.home()),
+                path: self.runtime_db_path(*spec),
             })
             .collect()
     }
@@ -234,7 +255,7 @@ impl SqliteConfig {
         migrator: &Migrator,
         telemetry_override: Option<&dyn DbTelemetry>,
     ) -> anyhow::Result<SqlitePool> {
-        let path = spec.path(self.home());
+        let path = self.runtime_db_path(spec);
         let started = Instant::now();
         let pool_result = self
             .open_read_write_pool(&path)
@@ -308,5 +329,27 @@ impl SqliteConfig {
             .max_connections(1)
             .connect_with(options)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_db_path_uses_the_override_only_for_logs() {
+        let home_path = std::env::temp_dir().join("codex-state-home");
+        let logs_path = std::env::temp_dir().join("codex-runtime-logs.sqlite");
+        let config = SqliteConfig {
+            sqlite_home: AbsolutePathBuf::try_from(home_path.clone())
+                .expect("temporary directory is absolute"),
+            logs_db_path: Some(logs_path.clone()),
+        };
+
+        assert_eq!(config.runtime_db_path(LOGS_DB), logs_path);
+        assert_eq!(
+            config.runtime_db_path(STATE_DB),
+            home_path.join(STATE_DB_FILENAME)
+        );
     }
 }
