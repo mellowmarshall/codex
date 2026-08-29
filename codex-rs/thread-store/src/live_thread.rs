@@ -244,7 +244,9 @@ impl LiveThread {
         self.thread_store
             .append_items(AppendThreadItemsParams {
                 thread_id: self.thread_id,
-                items: raw_items.to_vec(),
+                // Send the prepared batch across the storage seam. Passing `raw_items` here
+                // makes the lower store clone inline media again before applying the same policy.
+                items: items.clone(),
             })
             .await?;
         if let Some(measurement) = measurement.as_ref() {

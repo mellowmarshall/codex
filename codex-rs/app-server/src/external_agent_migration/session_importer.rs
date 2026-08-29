@@ -33,7 +33,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutItem;
-use codex_rollout::is_persisted_rollout_item;
+use codex_rollout::persisted_rollout_items;
 use codex_thread_store::AppendThreadItemsParams;
 use codex_thread_store::CreateThreadParams;
 use codex_thread_store::PersistContext;
@@ -493,7 +493,7 @@ impl ExternalAgentSessionImporter {
                 memory_mode,
             },
         };
-        rollout_items.retain(|item| is_persisted_rollout_item(item, ThreadHistoryMode::Legacy));
+        rollout_items = persisted_rollout_items(&rollout_items, ThreadHistoryMode::Legacy);
         let (created_at, updated_at) = rollout_items
             .iter()
             .filter_map(|item| match item {
