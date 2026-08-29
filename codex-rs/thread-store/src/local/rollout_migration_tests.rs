@@ -442,15 +442,17 @@ async fn migration_preserves_image_generation_failure_metadata() {
         }),
         saved_path: None,
     };
+    let mut source_item = expected_item.clone();
+    source_item.result = "legacy-inline-base64".to_string();
     let image_completion =
         RolloutItem::EventMsg(EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
-            call_id: expected_item.id.clone(),
-            status: expected_item.status.clone(),
-            revised_prompt: expected_item.revised_prompt.clone(),
-            result: expected_item.result.clone(),
-            transparent_background: expected_item.transparent_background,
-            failure: expected_item.failure.clone(),
-            saved_path: expected_item.saved_path.clone(),
+            call_id: source_item.id.clone(),
+            status: source_item.status.clone(),
+            revised_prompt: source_item.revised_prompt.clone(),
+            result: source_item.result.clone(),
+            transparent_background: source_item.transparent_background,
+            failure: source_item.failure.clone(),
+            saved_path: source_item.saved_path.clone(),
         }));
     let path = write_rollout(
         home.path(),

@@ -11,7 +11,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 
 use crate::ResponseItemEnvelope;
 use crate::RolloutItem;
-use crate::policy::is_persisted_rollout_item;
+use crate::policy::persisted_rollout_item;
 
 const ITEM_BYTES_METRIC: &str = "codex.rollout.persistence.item_bytes";
 const APPEND_METRIC: &str = "codex.rollout.persistence.append";
@@ -106,17 +106,20 @@ pub fn measure_and_filter_rollout_items(
     };
 
     for item in items {
-        let kept = is_persisted_rollout_item(item, history_mode);
-        let decision = if kept {
+        let persisted_item = persisted_rollout_item(item, history_mode);
+        let decision = if persisted_item.is_some() {
             PersistenceDecision::Kept
         } else {
             PersistenceDecision::Dropped
         };
         let payload_bytes = serialized_len(item).ok();
         add_to_totals(&mut measurement.pre_filter, payload_bytes);
-        if kept {
-            add_to_totals(&mut measurement.post_filter, payload_bytes);
-            persisted.push(item.clone());
+        if let Some(persisted_item) = persisted_item {
+            add_to_totals(
+                &mut measurement.post_filter,
+                serialized_len(&persisted_item).ok(),
+            );
+            persisted.push(persisted_item);
         }
         measurement.items.push(RolloutItemMeasurement {
             decision,
