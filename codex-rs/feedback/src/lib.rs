@@ -233,17 +233,19 @@ impl CodexFeedback {
             .with_timer(tracing_subscriber::fmt::time::SystemTime)
             .with_ansi(false)
             .with_target(false)
-            // Capture diagnostics independently of `RUST_LOG` without filling the feedback ring
-            // with high-volume request and response payloads.
+            // The feedback ring is for bounded support diagnostics, not full
+            // protocol tracing. TRACE app-server messages can contain complete
+            // image-bearing responses and allocate the payload before the ring
+            // evicts older bytes.
             .with_filter(
                 Targets::new()
-                    .with_default(Level::TRACE)
-                    .with_target("codex_http_client::transport", LevelFilter::DEBUG)
-                    .with_target("codex_api::sse", LevelFilter::DEBUG)
+                    .with_default(Level::INFO)
+                    .with_target("codex_http_client::transport", LevelFilter::INFO)
+                    .with_target("codex_api::sse", LevelFilter::INFO)
                     // `tracing-log` checks legacy log records against their original
                     // target before re-emitting them as `log`; tungstenite TRACE
                     // includes full websocket frames and authenticated handshakes.
-                    .with_target("tungstenite", LevelFilter::DEBUG)
+                    .with_target("tungstenite", LevelFilter::INFO)
                     .with_target("codex_api::responses_websocket_timing", LevelFilter::OFF)
                     .with_target("codex_core::post_sampling_token_estimate", LevelFilter::OFF),
             )
@@ -902,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn logger_layer_filters_noisy_trace_payloads() {
+    fn logger_layer_keeps_info_without_verbose_payloads() {
         let fb = CodexFeedback::new();
         let _guard = tracing_subscriber::registry()
             // Keep another TRACE subscriber interested so bridged records are
@@ -925,6 +927,7 @@ mod tests {
         );
         log::trace!(target: "tungstenite::protocol", "websocket-frame-payload");
         log::debug!(target: "tungstenite::protocol", "websocket-debug");
+        tracing::info!(target: "codex_feedback_test", "retained-info");
 
         let logs = String::from_utf8(fb.snapshot(/*session_id*/ None).bytes).unwrap();
         for excluded in [
@@ -934,18 +937,15 @@ mod tests {
             "nested-sse-trace",
             "websocket-handshake-payload",
             "websocket-frame-payload",
-        ] {
-            assert!(!logs.contains(excluded));
-        }
-        for retained in [
             "transport-debug",
             "sse-debug",
             "unrelated-trace",
             "unrelated-log-trace",
             "websocket-debug",
         ] {
-            assert!(logs.contains(retained));
+            assert!(!logs.contains(excluded));
         }
+        assert!(logs.contains("retained-info"));
     }
 
     #[test]
