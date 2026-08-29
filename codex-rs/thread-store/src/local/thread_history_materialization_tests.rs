@@ -2020,6 +2020,181 @@ async fn catch_up_preserves_trailing_partial_line_boundaries() {
 }
 
 #[tokio::test]
+async fn catch_up_projects_large_suffix_in_bounded_batches() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist session metadata");
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let before = projection_state(&pool, thread_id).await;
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("rollout path");
+    let message_text = "x".repeat(1024 * 1024);
+    let mut suffix = format!("{}\n", rollout_line(Some(1), turn_started("turn-1")));
+    for ordinal in 2..=70 {
+        let item_id = format!("agent-{ordinal}");
+        let item = TurnItem::AgentMessage(AgentMessageItem {
+            id: item_id,
+            content: vec![AgentMessageContent::Text {
+                text: message_text.clone(),
+            }],
+            phase: Some(MessagePhase::Commentary),
+            memory_citation: None,
+            delivery: None,
+        });
+        suffix.push_str(&rollout_line(
+            Some(ordinal),
+            completed_item(thread_id, "turn-1", item),
+        ));
+        suffix.push('\n');
+    }
+    suffix.push_str(&rollout_line(Some(71), turn_completed("turn-1")));
+    suffix.push('\n');
+    append_suffix(rollout_path.as_path(), suffix.as_str());
+
+    let mut rollout_file = tokio::fs::File::from_std(
+        codex_rollout::open_rollout_seekable_reader(rollout_path.as_path())
+            .expect("open rollout snapshot"),
+    );
+    let (_, first_batch_end, next_ordinal) = super::read_projection_steps(
+        &mut rollout_file,
+        rollout_path.as_path(),
+        u64::try_from(before.0).expect("non-negative projection offset"),
+        u64::try_from(before.1).expect("non-negative projection ordinal"),
+        thread_id,
+        /*subagent_history_start_ordinal*/ None,
+    )
+    .await
+    .expect("read first projection batch");
+    assert!(
+        first_batch_end - u64::try_from(before.0).expect("non-negative projection offset")
+            <= super::PROJECTION_READ_BATCH_BYTES
+    );
+    assert!(first_batch_end < fs::metadata(&rollout_path).expect("rollout metadata").len());
+    assert!(next_ordinal < 72);
+
+    super::materialize_to_sqlite(&store, thread_id, rollout_path.as_path())
+        .await
+        .expect("project all bounded batches");
+
+    let rollout_len = i64::try_from(fs::metadata(&rollout_path).expect("rollout metadata").len())
+        .expect("rollout length");
+    assert_eq!(projection_state(&pool, thread_id).await, (rollout_len, 72));
+}
+
+#[tokio::test]
+async fn catch_up_rebuilds_projection_after_rollout_replacement() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![turn_started("stale-turn"), user_message("stale payload")],
+        })
+        .await
+        .expect("append stale projection rows");
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("rollout path");
+    let original = fs::read_to_string(&rollout_path).expect("read original rollout");
+    let session_meta = original.lines().next().expect("session metadata line");
+    let replacement = format!("{session_meta}\n");
+    fs::write(&rollout_path, replacement.as_bytes())
+        .expect("replace rollout with canonical prefix");
+
+    super::materialize_to_sqlite(&store, thread_id, rollout_path.as_path())
+        .await
+        .expect("rebuild projection from replacement rollout");
+
+    let rollout_len = i64::try_from(replacement.len()).expect("rollout length");
+    assert_eq!(projection_state(&pool, thread_id).await, (rollout_len, 1));
+    let counts = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+SELECT
+    (SELECT COUNT(*) FROM thread_turns WHERE thread_id = ?),
+    (SELECT COUNT(*) FROM thread_items WHERE thread_id = ?)
+        "#,
+    )
+    .bind(thread_id.to_string())
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("read rebuilt projection row counts");
+    assert_eq!(counts, (0, 0));
+}
+
+#[tokio::test]
+async fn catch_up_skips_legacy_retry_at_projection_cursor() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![turn_started("turn-1")],
+        })
+        .await
+        .expect("append initial turn");
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let before = projection_state(&pool, thread_id).await;
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("rollout path");
+    let suffix = format!(
+        "{}\n{}\n{}\n{}\n",
+        rollout_line(Some(1), turn_started("legacy-retry")),
+        rollout_line(Some(2), turn_completed("turn-1")),
+        rollout_line(Some(2), turn_started("same-batch-retry")),
+        rollout_line(Some(3), turn_completed("turn-1")),
+    );
+    append_suffix(rollout_path.as_path(), suffix.as_str());
+
+    super::materialize_to_sqlite(&store, thread_id, rollout_path.as_path())
+        .await
+        .expect("skip committed retry and project new record");
+
+    let rollout_len = i64::try_from(fs::metadata(&rollout_path).expect("rollout metadata").len())
+        .expect("rollout length");
+    assert_eq!(before.1, 2);
+    assert_eq!(projection_state(&pool, thread_id).await, (rollout_len, 4));
+    let retry_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM thread_turns WHERE thread_id = ? AND turn_id IN ('legacy-retry', 'same-batch-retry')",
+    )
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("read retry row count");
+    assert_eq!(retry_count, 0);
+}
+
+#[tokio::test]
 async fn catch_up_rejects_invalid_complete_suffixes_without_advancing_state() {
     let cases = [
         (
@@ -2027,14 +2202,6 @@ async fn catch_up_rejects_invalid_complete_suffixes_without_advancing_state() {
             format!(
                 "{}\n",
                 rollout_line(/*ordinal*/ None, turn_started("turn-1"))
-            ),
-        ),
-        (
-            "duplicate ordinal",
-            format!(
-                "{}\n{}\n",
-                rollout_line(Some(1), turn_started("turn-1")),
-                rollout_line(Some(1), turn_started("turn-2")),
             ),
         ),
         (
