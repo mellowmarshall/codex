@@ -2144,6 +2144,63 @@ SELECT
 }
 
 #[tokio::test]
+async fn catch_up_rebuilds_projection_when_replacement_crosses_stale_offset() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![turn_started("stale-turn"), user_message("stale payload")],
+        })
+        .await
+        .expect("append stale projection rows");
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let stale_checkpoint = projection_state(&pool, thread_id).await;
+    let stale_offset = usize::try_from(stale_checkpoint.0).expect("non-negative stale offset");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("rollout path");
+    let original = fs::read_to_string(&rollout_path).expect("read original rollout");
+    let session_meta = original.lines().next().expect("session metadata line");
+    let replacement = format!(
+        "{session_meta}\n{}\n{}\n{}\n",
+        rollout_line(Some(1), turn_started("replacement-turn")),
+        rollout_line(Some(2), user_message("x".repeat(stale_offset).as_str())),
+        rollout_line(Some(3), turn_completed("replacement-turn")),
+    );
+    assert!(replacement.len() > stale_offset);
+    assert_ne!(replacement.as_bytes()[stale_offset - 1], b'\n');
+    fs::write(&rollout_path, replacement.as_bytes())
+        .expect("replace rollout across stale checkpoint");
+
+    super::materialize_to_sqlite(&store, thread_id, rollout_path.as_path())
+        .await
+        .expect("rebuild projection from longer replacement rollout");
+
+    let rollout_len = i64::try_from(replacement.len()).expect("rollout length");
+    assert_eq!(projection_state(&pool, thread_id).await, (rollout_len, 4));
+    let turns = sqlx::query_as::<_, (String, String)>(
+        "SELECT turn_id, status FROM thread_turns WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read rebuilt projection turns");
+    assert_eq!(
+        turns,
+        vec![("replacement-turn".to_string(), "completed".to_string())]
+    );
+}
+
+#[tokio::test]
 async fn catch_up_skips_legacy_retry_at_projection_cursor() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;

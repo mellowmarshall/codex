@@ -12,6 +12,7 @@ use tracing::warn;
 
 use super::LocalThreadStore;
 use super::thread_history::ProjectedRolloutLine;
+use super::thread_history::RolloutProjectionState;
 use super::thread_history::RolloutProjectionStep;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
@@ -39,9 +40,8 @@ pub(super) async fn materialize_to_sqlite(
         Err(err) => return Err(thread_store_io_error(err)),
     };
     let mut projection_state = super::thread_history::projection_state(store, thread_id).await?;
-    let file_end_offset = file.metadata().await.map_err(thread_store_io_error)?.len();
     if let Some(state) = projection_state.as_ref()
-        && file_end_offset < state.next_byte_offset
+        && !projection_checkpoint_matches_rollout(&mut file, state).await?
     {
         warn!(
             thread_id = %thread_id,
@@ -94,6 +94,59 @@ pub(super) async fn materialize_to_sqlite(
         start_offset = next_offset;
         expected_ordinal = next_ordinal;
     }
+}
+
+async fn projection_checkpoint_matches_rollout(
+    file: &mut tokio::fs::File,
+    state: &RolloutProjectionState,
+) -> ThreadStoreResult<bool> {
+    let file_len = file.metadata().await.map_err(thread_store_io_error)?.len();
+    if state.next_byte_offset > file_len {
+        return Ok(false);
+    }
+    if state.next_byte_offset == 0 {
+        return Ok(true);
+    }
+
+    file.seek(SeekFrom::Start(state.next_byte_offset - 1))
+        .await
+        .map_err(thread_store_io_error)?;
+    let mut preceding_byte = [0];
+    file.read_exact(&mut preceding_byte)
+        .await
+        .map_err(thread_store_io_error)?;
+    if preceding_byte[0] != b'\n' {
+        return Ok(false);
+    }
+    if state.next_byte_offset == file_len {
+        return Ok(true);
+    }
+
+    // Paginated rollout records begin with their ordinal. Checking a small prefix prevents a
+    // same-or-longer atomic replacement from accidentally reusing a checkpoint that happens to
+    // fall on a different record boundary. Unknown or incomplete records remain the projection
+    // reader's responsibility.
+    const ORDINAL_PREFIX_BYTES: usize = 64;
+    let remaining = file_len - state.next_byte_offset;
+    let prefix_len = usize::try_from(remaining.min(ORDINAL_PREFIX_BYTES as u64)).map_err(|_| {
+        ThreadStoreError::Internal {
+            message: "durable rollout prefix exceeds addressable memory".to_string(),
+        }
+    })?;
+    let mut prefix = vec![0; prefix_len];
+    file.read_exact(prefix.as_mut_slice())
+        .await
+        .map_err(thread_store_io_error)?;
+    let Some(ordinal) = paginated_record_prefix_ordinal(prefix.as_slice()) else {
+        return Ok(true);
+    };
+    Ok(ordinal == state.next_ordinal || ordinal.checked_add(1) == Some(state.next_ordinal))
+}
+
+fn paginated_record_prefix_ordinal(prefix: &[u8]) -> Option<u64> {
+    let prefix = prefix.strip_prefix(br#"{"ordinal":"#)?;
+    let end = prefix.iter().position(|byte| *byte == b',')?;
+    std::str::from_utf8(&prefix[..end]).ok()?.parse().ok()
 }
 
 async fn read_projection_steps(
