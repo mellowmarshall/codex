@@ -39,6 +39,34 @@ fn retained_message(text: &str) -> RolloutItem {
     }))
 }
 
+#[test]
+fn measurement_returns_sanitized_image_generation_item() {
+    let item = RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+        ResponseItem::ImageGenerationCall {
+            id: None,
+            status: "completed".to_string(),
+            revised_prompt: Some("prompt".to_string()),
+            result: "large-base64-result".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ));
+
+    let (persisted, measurement) =
+        measure_and_filter_rollout_items(&[item], ThreadHistoryMode::Paginated);
+
+    let RolloutItem::ResponseItem(item) = &persisted[0] else {
+        panic!("expected response item");
+    };
+    let ResponseItem::ImageGenerationCall { result, .. } = &item.item else {
+        panic!("expected image generation call");
+    };
+    assert!(result.is_empty());
+    assert!(
+        measurement.post_filter.payload_bytes < measurement.pre_filter.payload_bytes,
+        "post-filter metrics must measure the sanitized payload"
+    );
+}
+
 fn turn_started(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: turn_id.to_string(),
