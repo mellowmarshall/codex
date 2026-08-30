@@ -1,5 +1,6 @@
 use codex_extension_items::ExtensionItem;
 use codex_extension_items::image_generation::ImageGenerationItem;
+use codex_protocol::items::FunctionCallOutputItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -31,6 +32,7 @@ fn persisted_image_generation_uses_saved_file_instead_of_inline_result() {
             transparent_background: None,
             failure: None,
             saved_path: Some(test_path_buf("/tmp/image-1.png").abs()),
+            imagegen_request_id: Some("request-1".to_string()),
         })),
         started_at_ms: Some(1),
         completed_at_ms: 2,
@@ -49,6 +51,7 @@ fn persisted_image_generation_uses_saved_file_instead_of_inline_result() {
         image.saved_path,
         Some(test_path_buf("/tmp/image-1.png").abs())
     );
+    assert_eq!(image.imagegen_request_id.as_deref(), Some("request-1"));
 }
 
 #[test]
@@ -65,6 +68,7 @@ fn unsaved_image_generation_drops_inline_result() {
             transparent_background: None,
             failure: None,
             saved_path: None,
+            imagegen_request_id: None,
         })),
         started_at_ms: Some(1),
         completed_at_ms: 2,
@@ -80,6 +84,68 @@ fn unsaved_image_generation_drops_inline_result() {
     };
     assert_eq!(image.result, "");
     assert_eq!(image.saved_path, None);
+}
+
+#[test]
+fn persisted_function_call_output_replaces_inline_media_in_both_history_modes() {
+    let thread_id = codex_protocol::ThreadId::default();
+    let item = RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+        thread_id,
+        turn_id: "turn-1".to_string(),
+        item: TurnItem::FunctionCallOutput(FunctionCallOutputItem {
+            id: "function-1".to_string(),
+            name: "view_image".to_string(),
+            namespace: Some("functions".to_string()),
+            output: FunctionCallOutputBody::ContentItems(vec![
+                FunctionCallOutputContentItem::InputText {
+                    text: "kept".to_string(),
+                },
+                FunctionCallOutputContentItem::InputImage {
+                    image_url: "data:image/png;base64,large-result".to_string(),
+                    detail: None,
+                },
+                FunctionCallOutputContentItem::InputAudio {
+                    audio_url: "data:audio/wav;base64,large-result".to_string(),
+                },
+                FunctionCallOutputContentItem::EncryptedContent {
+                    encrypted_content: "kept encrypted".to_string(),
+                },
+            ]),
+        }),
+        started_at_ms: Some(1),
+        completed_at_ms: 2,
+    }));
+
+    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        let persisted = persisted_rollout_items(std::slice::from_ref(&item), history_mode);
+
+        let RolloutItem::EventMsg(EventMsg::ItemCompleted(completed)) = &persisted[0] else {
+            panic!("expected completed item");
+        };
+        let TurnItem::FunctionCallOutput(output) = &completed.item else {
+            panic!("expected function call output");
+        };
+        assert_eq!(output.id, "function-1");
+        assert_eq!(output.name, "view_image");
+        assert_eq!(output.namespace.as_deref(), Some("functions"));
+        assert_eq!(
+            output.output,
+            FunctionCallOutputBody::ContentItems(vec![
+                FunctionCallOutputContentItem::InputText {
+                    text: "kept".to_string(),
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: "[inline tool image omitted from persisted history]".to_string(),
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: "[inline tool audio omitted from persisted history]".to_string(),
+                },
+                FunctionCallOutputContentItem::EncryptedContent {
+                    encrypted_content: "kept encrypted".to_string(),
+                },
+            ])
+        );
+    }
 }
 
 fn image_generation_response(result: &str) -> ResponseItem {

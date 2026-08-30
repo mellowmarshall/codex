@@ -119,6 +119,24 @@ fn raw_image_generation_notification_clears_only_the_result() {
 }
 
 #[test]
+fn function_call_output_notification_drops_media_only() {
+    let function = completed_notification(ThreadItem::FunctionCallOutput {
+        id: "function".to_string(),
+        name: "view_image".to_string(),
+        namespace: Some("functions".to_string()),
+        output: FunctionCallOutputBody::ContentItems(tool_output_items()),
+    });
+    let expected = completed_notification(ThreadItem::FunctionCallOutput {
+        id: "function".to_string(),
+        name: "view_image".to_string(),
+        namespace: Some("functions".to_string()),
+        output: FunctionCallOutputBody::ContentItems(filtered_tool_output_items()),
+    });
+
+    assert_notification_eq(without_notification_media(function), expected);
+}
+
+#[test]
 fn user_and_dynamic_tool_notifications_drop_inline_media_only() {
     let user = completed_notification(ThreadItem::UserMessage {
         id: "user".to_string(),
