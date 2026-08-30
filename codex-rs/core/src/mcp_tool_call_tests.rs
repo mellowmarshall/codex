@@ -1064,6 +1064,34 @@ fn truncate_mcp_tool_result_for_event_preserves_small_result() {
 }
 
 #[test]
+fn truncate_mcp_tool_result_for_event_removes_media_before_truncation() {
+    let sentinel = "sensitive-inline-media";
+    let original = CallToolResult {
+        content: vec![
+            serde_json::json!({"type": "image", "data": sentinel}),
+            serde_json::json!({"type": "audio", "data": sentinel}),
+            serde_json::json!({"type": "resource", "resource": {"blob": sentinel}}),
+            serde_json::json!({"type": "text", "text": "kept"}),
+        ],
+        structured_content: Some(serde_json::json!({
+            "preview": format!("DATA:APPLICATION/OCTET-STREAM;base64,{sentinel}"),
+        })),
+        is_error: Some(false),
+        meta: Some(serde_json::json!({
+            "audio": format!("data:audio/wav;base64,{sentinel}"),
+        })),
+    };
+
+    let got = truncate_mcp_tool_result_for_event(&Ok(original))
+        .expect("media-free result should remain successful");
+    let serialized = serde_json::to_string(&got).expect("sanitized result should serialize");
+
+    assert!(!serialized.contains(sentinel));
+    assert!(serialized.contains("kept"));
+    assert!(serialized.contains("omitted from history"));
+}
+
+#[test]
 fn truncate_mcp_tool_result_for_event_bounds_large_result() {
     let original = CallToolResult {
         content: vec![serde_json::json!({
@@ -1083,11 +1111,7 @@ fn truncate_mcp_tool_result_for_event_bounds_large_result() {
         .expect("large result should remain successful");
     let serialized = serde_json::to_string(&got).expect("truncated result should serialize");
 
-    // The truncated preview is embedded as a JSON string, so quotes and
-    // backslashes can be escaped again. That can roughly double the preview
-    // bytes in the worst case. The extra buffer covers the small result wrapper
-    // and marker.
-    assert!(serialized.len() < MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES * 2 + 1024);
+    assert!(serialized.len() < 1024);
     assert_eq!(got.structured_content, None);
     assert_eq!(got.meta, None);
     assert_eq!(got.is_error, Some(false));
@@ -1095,8 +1119,8 @@ fn truncate_mcp_tool_result_for_event_bounds_large_result() {
         got.content[0]
             .get("text")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|text| text.contains("truncated")),
-        "large event result should contain a truncation marker: {got:?}"
+            .is_some_and(|text| text.contains("oversized MCP result omitted")),
+        "large event result should contain an omission marker: {got:?}"
     );
 }
 

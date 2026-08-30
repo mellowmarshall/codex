@@ -8,18 +8,33 @@ use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
 use codex_protocol::items::DynamicToolCallItem;
 use codex_protocol::items::FunctionCallOutputItem;
 use codex_protocol::items::ImageGenerationItem;
+use codex_protocol::items::McpToolCallItem;
 use codex_protocol::items::TurnItem;
+use codex_protocol::items::UserMessageItem;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ImageGenerationEndEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::McpToolCallEndEvent;
 use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::UserMessageEvent;
+use codex_protocol::protocol::WebSearchEndEvent;
+use codex_protocol::user_input::UserInput;
 
 const OMITTED_INLINE_TOOL_IMAGE: &str = "[inline tool image omitted from persisted history]";
 const OMITTED_INLINE_TOOL_AUDIO: &str = "[inline tool audio omitted from persisted history]";
+const OMITTED_INLINE_USER_IMAGE: &str = "[inline user image omitted from persisted history]";
+const OMITTED_INLINE_USER_AUDIO: &str = "[inline user audio omitted from persisted history]";
+
+fn has_data_scheme(value: &str) -> bool {
+    value
+        .get(.."data:".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+}
 
 /// Whether a rollout `item` should be persisted in rollout files.
 pub fn is_persisted_rollout_item(item: &RolloutItem, history_mode: ThreadHistoryMode) -> bool {
@@ -101,6 +116,23 @@ fn clone_response_envelope_without_inline_media(
 
 fn clone_response_without_inline_media(item: &ResponseItem) -> ResponseItem {
     match item {
+        ResponseItem::Message {
+            id,
+            role,
+            content,
+            phase,
+            internal_chat_message_metadata_passthrough,
+        } => ResponseItem::Message {
+            id: id.clone(),
+            role: role.clone(),
+            content: content
+                .iter()
+                .map(clone_message_content_without_inline_media)
+                .collect(),
+            phase: phase.clone(),
+            internal_chat_message_metadata_passthrough: internal_chat_message_metadata_passthrough
+                .clone(),
+        },
         ResponseItem::ImageGenerationCall {
             id,
             status,
@@ -149,6 +181,22 @@ fn clone_response_without_inline_media(item: &ResponseItem) -> ResponseItem {
     }
 }
 
+fn clone_message_content_without_inline_media(item: &ContentItem) -> ContentItem {
+    match item {
+        ContentItem::InputImage { image_url, .. } if has_data_scheme(image_url) => {
+            ContentItem::InputText {
+                text: OMITTED_INLINE_USER_IMAGE.to_string(),
+            }
+        }
+        ContentItem::InputAudio { audio_url } if has_data_scheme(audio_url) => {
+            ContentItem::InputText {
+                text: OMITTED_INLINE_USER_AUDIO.to_string(),
+            }
+        }
+        _ => item.clone(),
+    }
+}
+
 fn clone_output_without_inline_media(
     output: &FunctionCallOutputPayload,
 ) -> FunctionCallOutputPayload {
@@ -177,15 +225,13 @@ fn clone_function_output_item_without_inline_media(
 ) -> FunctionCallOutputContentItem {
     match item {
         FunctionCallOutputContentItem::InputImage { image_url, .. }
-            if image_url.starts_with("data:image/") =>
+            if has_data_scheme(image_url) =>
         {
             FunctionCallOutputContentItem::InputText {
                 text: OMITTED_INLINE_TOOL_IMAGE.to_string(),
             }
         }
-        FunctionCallOutputContentItem::InputAudio { audio_url }
-            if audio_url.starts_with("data:audio/") =>
-        {
+        FunctionCallOutputContentItem::InputAudio { audio_url } if has_data_scheme(audio_url) => {
             FunctionCallOutputContentItem::InputText {
                 text: OMITTED_INLINE_TOOL_AUDIO.to_string(),
             }
@@ -196,6 +242,9 @@ fn clone_function_output_item_without_inline_media(
 
 fn clone_event_without_inline_media(event: &EventMsg) -> EventMsg {
     match event {
+        EventMsg::UserMessage(event) => {
+            EventMsg::UserMessage(clone_legacy_user_message_without_inline_media(event))
+        }
         EventMsg::ItemCompleted(event) => EventMsg::ItemCompleted(ItemCompletedEvent {
             thread_id: event.thread_id,
             turn_id: event.turn_id.clone(),
@@ -214,12 +263,84 @@ fn clone_event_without_inline_media(event: &EventMsg) -> EventMsg {
                 saved_path: event.saved_path.clone(),
             })
         }
+        EventMsg::McpToolCallEnd(event) => EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+            call_id: event.call_id.clone(),
+            invocation: event.invocation.clone(),
+            connector_id: event.connector_id.clone(),
+            mcp_app_resource_uri: event.mcp_app_resource_uri.clone(),
+            link_id: event.link_id.clone(),
+            app_name: event.app_name.clone(),
+            action_name: event.action_name.clone(),
+            plugin_id: event.plugin_id.clone(),
+            read_only_hint: event.read_only_hint,
+            duration: event.duration,
+            result: event
+                .result
+                .as_ref()
+                .map(codex_protocol::mcp::CallToolResult::without_inline_media)
+                .map_err(Clone::clone),
+        }),
+        EventMsg::WebSearchEnd(event) => EventMsg::WebSearchEnd(WebSearchEndEvent {
+            call_id: event.call_id.clone(),
+            query: event.query.clone(),
+            action: event.action.clone(),
+            results: event
+                .results
+                .as_deref()
+                .map(codex_extension_items::web_search::results_without_inline_media),
+        }),
         _ => event.clone(),
+    }
+}
+
+fn clone_legacy_user_message_without_inline_media(event: &UserMessageEvent) -> UserMessageEvent {
+    let mut image_details = Vec::new();
+    let images = event.images.as_ref().map(|images| {
+        images
+            .iter()
+            .enumerate()
+            .filter_map(|(index, image)| {
+                if has_data_scheme(image) {
+                    None
+                } else {
+                    image_details.push(event.image_details.get(index).cloned().unwrap_or(None));
+                    Some(image.clone())
+                }
+            })
+            .collect()
+    });
+    let audio = event.audio.as_ref().map(|audio| {
+        audio
+            .iter()
+            .filter(|item| !has_data_scheme(item))
+            .cloned()
+            .collect()
+    });
+
+    UserMessageEvent {
+        client_id: event.client_id.clone(),
+        message: event.message.clone(),
+        images,
+        image_details,
+        local_images: event.local_images.clone(),
+        local_image_details: event.local_image_details.clone(),
+        audio,
+        local_audio: event.local_audio.clone(),
+        text_elements: event.text_elements.clone(),
     }
 }
 
 fn clone_turn_item_without_inline_media(item: &TurnItem) -> TurnItem {
     match item {
+        TurnItem::UserMessage(item) => TurnItem::UserMessage(UserMessageItem {
+            id: item.id.clone(),
+            client_id: item.client_id.clone(),
+            content: item
+                .content
+                .iter()
+                .map(clone_user_input_without_inline_media)
+                .collect(),
+        }),
         TurnItem::Extension(ExtensionItem::ImageGeneration(image)) => TurnItem::Extension(
             ExtensionItem::ImageGeneration(ExtensionImageGenerationItem {
                 id: image.id.clone(),
@@ -232,6 +353,18 @@ fn clone_turn_item_without_inline_media(item: &TurnItem) -> TurnItem {
                 imagegen_request_id: image.imagegen_request_id.clone(),
             }),
         ),
+        TurnItem::Extension(ExtensionItem::WebSearch(item)) => {
+            TurnItem::Extension(ExtensionItem::WebSearch(item.without_inline_media()))
+        }
+        TurnItem::WebSearch(item) => TurnItem::WebSearch(codex_protocol::items::WebSearchItem {
+            id: item.id.clone(),
+            query: item.query.clone(),
+            action: item.action.clone(),
+            results: item
+                .results
+                .as_deref()
+                .map(codex_extension_items::web_search::results_without_inline_media),
+        }),
         TurnItem::ImageGeneration(image) => TurnItem::ImageGeneration(ImageGenerationItem {
             id: image.id.clone(),
             status: image.status.clone(),
@@ -263,6 +396,40 @@ fn clone_turn_item_without_inline_media(item: &TurnItem) -> TurnItem {
                 output: clone_output_body_without_inline_media(&item.output),
             })
         }
+        TurnItem::McpToolCall(item) => TurnItem::McpToolCall(McpToolCallItem {
+            id: item.id.clone(),
+            server: item.server.clone(),
+            tool: item.tool.clone(),
+            arguments: item.arguments.clone(),
+            connector_id: item.connector_id.clone(),
+            mcp_app_resource_uri: item.mcp_app_resource_uri.clone(),
+            link_id: item.link_id.clone(),
+            app_name: item.app_name.clone(),
+            action_name: item.action_name.clone(),
+            plugin_id: item.plugin_id.clone(),
+            read_only_hint: item.read_only_hint,
+            status: item.status,
+            result: item
+                .result
+                .as_ref()
+                .map(codex_protocol::mcp::CallToolResult::without_inline_media),
+            error: item.error.clone(),
+            duration: item.duration,
+        }),
+        _ => item.clone(),
+    }
+}
+
+fn clone_user_input_without_inline_media(item: &UserInput) -> UserInput {
+    match item {
+        UserInput::Image { image_url, .. } if has_data_scheme(image_url) => UserInput::Text {
+            text: OMITTED_INLINE_USER_IMAGE.to_string(),
+            text_elements: Vec::new(),
+        },
+        UserInput::Audio { audio_url } if has_data_scheme(audio_url) => UserInput::Text {
+            text: OMITTED_INLINE_USER_AUDIO.to_string(),
+            text_elements: Vec::new(),
+        },
         _ => item.clone(),
     }
 }
@@ -272,14 +439,14 @@ fn clone_dynamic_tool_item_without_inline_media(
 ) -> DynamicToolCallOutputContentItem {
     match item {
         DynamicToolCallOutputContentItem::InputImage { image_url }
-            if image_url.starts_with("data:image/") =>
+            if has_data_scheme(image_url) =>
         {
             DynamicToolCallOutputContentItem::InputText {
                 text: OMITTED_INLINE_TOOL_IMAGE.to_string(),
             }
         }
         DynamicToolCallOutputContentItem::InputAudio { audio_url }
-            if audio_url.starts_with("data:audio/") =>
+            if has_data_scheme(audio_url) =>
         {
             DynamicToolCallOutputContentItem::InputText {
                 text: OMITTED_INLINE_TOOL_AUDIO.to_string(),

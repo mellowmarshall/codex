@@ -46,6 +46,7 @@ pub struct RolloutItemMeasurement {
     pub decision: PersistenceDecision,
     pub rollout_item_type: String,
     pub payload_bytes: Option<u64>,
+    pub post_filter_payload_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -114,17 +115,18 @@ pub fn measure_and_filter_rollout_items(
         };
         let payload_bytes = serialized_len(item).ok();
         add_to_totals(&mut measurement.pre_filter, payload_bytes);
+        let post_filter_payload_bytes = persisted_item
+            .as_ref()
+            .and_then(|persisted_item| serialized_len(persisted_item).ok());
         if let Some(persisted_item) = persisted_item {
-            add_to_totals(
-                &mut measurement.post_filter,
-                serialized_len(&persisted_item).ok(),
-            );
+            add_to_totals(&mut measurement.post_filter, post_filter_payload_bytes);
             persisted.push(persisted_item);
         }
         measurement.items.push(RolloutItemMeasurement {
             decision,
             rollout_item_type: rollout_item_type(item),
             payload_bytes,
+            post_filter_payload_bytes,
         });
     }
 
@@ -202,7 +204,7 @@ fn finish_turn(
 fn add_item_to_turn(totals: &mut TurnSizeTotals, item: &RolloutItemMeasurement) {
     add_to_totals(&mut totals.pre_filter, item.payload_bytes);
     if item.decision == PersistenceDecision::Kept {
-        add_to_totals(&mut totals.post_filter, item.payload_bytes);
+        add_to_totals(&mut totals.post_filter, item.post_filter_payload_bytes);
     }
 }
 

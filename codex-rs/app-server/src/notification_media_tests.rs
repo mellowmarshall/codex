@@ -4,6 +4,8 @@ use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::McpToolCallResult;
 use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::RawResponseItemCompletedNotification;
+use codex_app_server_protocol::WebSearchAction;
+use codex_app_server_protocol::WebSearchItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
 use pretty_assertions::assert_eq;
@@ -202,32 +204,64 @@ fn user_and_dynamic_tool_notifications_drop_inline_media_only() {
 
 #[test]
 fn mcp_notification_drops_media_and_blob_resources_only() {
-    let item = |content| {
-        completed_notification(ThreadItem::McpToolCall {
-            id: "mcp".to_string(),
-            server: "server".to_string(),
-            tool: "tool".to_string(),
-            status: McpToolCallStatus::Completed,
-            arguments: json!({}),
-            app_context: None,
-            mcp_app_resource_uri: None,
-            plugin_id: None,
-            read_only_hint: None,
-            result: Some(Box::new(McpToolCallResult {
-                content,
-                structured_content: Some(json!({"keep": true})),
-                meta: Some(json!({"keep": true})),
+    let notification = completed_notification(ThreadItem::McpToolCall {
+        id: "mcp".to_string(),
+        server: "server".to_string(),
+        tool: "tool".to_string(),
+        status: McpToolCallStatus::Completed,
+        arguments: json!({}),
+        app_context: None,
+        mcp_app_resource_uri: None,
+        plugin_id: None,
+        read_only_hint: None,
+        result: Some(Box::new(McpToolCallResult {
+            content: vec![
+                json!({"type": "image", "data": "sensitive-image"}),
+                json!({"type": "audio", "data": "sensitive-audio"}),
+                json!({"type": "resource", "resource": {"blob": "sensitive-blob"}}),
+                json!({"type": "text", "text": "keep text"}),
+            ],
+            structured_content: Some(json!({
+                "media": "DATA:APPLICATION/OCTET-STREAM;base64,sensitive-structured",
+                "keep": true,
             })),
-            error: None,
-            duration_ms: Some(1),
-        })
-    };
-    let notification = item(vec![
-        json!({"type": "image", "data": "image"}),
-        json!({"type": "audio", "data": "audio"}),
-        json!({"type": "resource", "resource": {"blob": "bytes"}}),
-        json!({"type": "text", "text": "keep text"}),
-    ]);
-    let expected = item(vec![json!({"type": "text", "text": "keep text"})]);
-    assert_notification_eq(without_notification_media(notification), expected);
+            meta: Some(json!({
+                "media": "data:image/png;base64,sensitive-meta",
+                "keep": true,
+            })),
+        })),
+        error: None,
+        duration_ms: Some(1),
+    });
+
+    let filtered = without_notification_media(notification);
+    let serialized = serde_json::to_string(&filtered).expect("serialize filtered notification");
+    assert!(!serialized.contains("sensitive-"));
+    assert!(serialized.contains("keep text"));
+    assert!(serialized.contains("\"keep\":true"));
+    assert!(serialized.contains("\"id\":\"mcp\""));
+}
+
+#[test]
+fn web_search_notification_removes_media_and_bounds_opaque_results() {
+    let notification = completed_notification(ThreadItem::WebSearch(WebSearchItem {
+        id: "search-1".to_string(),
+        query: "keep query".to_string(),
+        action: Some(WebSearchAction::Search {
+            query: Some("keep query".to_string()),
+            queries: None,
+        }),
+        results: Some(vec![json!({
+            "media": "DATA:APPLICATION/OCTET-STREAM;base64,sensitive-web",
+            "large": "x".repeat(1024 * 1024),
+        })]),
+    }));
+
+    let filtered = without_notification_media(notification);
+    let serialized = serde_json::to_string(&filtered).expect("serialize filtered notification");
+    assert!(!serialized.contains("sensitive-web"));
+    assert!(serialized.len() < 2048);
+    assert!(serialized.contains("search-1"));
+    assert!(serialized.contains("keep query"));
+    assert!(serialized.contains("oversized web search results omitted"));
 }

@@ -823,6 +823,14 @@ impl LocalThreadStore {
                     .map_err(migration_error)?;
             }
             sync_parent_directory(rollout_path).await?;
+            let published_identity =
+                super::thread_history_materialization::rollout_file_identity(rollout_path).await?;
+            thread_history::update_projection_file_identity(
+                self,
+                thread_id,
+                published_identity,
+            )
+            .await?;
             self.finish_published_migration(thread_id, journal_path, legacy_names)
                 .await
         }
@@ -1041,6 +1049,10 @@ impl LocalThreadStore {
         if let Some(decompressed_path) = decompressed_path.as_ref() {
             remove_file_if_present(decompressed_path).await?;
         }
+        let published_identity =
+            super::thread_history_materialization::rollout_file_identity(rollout_path).await?;
+        thread_history::update_projection_file_identity(self, thread_id, published_identity)
+            .await?;
         self.finish_published_migration(thread_id, journal_path, legacy_names)
             .await?;
         Ok(rollout_path.to_path_buf())
@@ -1125,6 +1137,8 @@ impl LocalThreadStore {
         rollout_path: &Path,
         limiter: &mut RolloutMigrationRateLimiter,
     ) -> ThreadStoreResult<()> {
+        let file_identity =
+            super::thread_history_materialization::rollout_file_identity(rollout_path).await?;
         let subagent_history_start_ordinal = codex_rollout::read_session_meta_line(rollout_path)
             .await
             .map_err(migration_error)?
@@ -1182,6 +1196,7 @@ impl LocalThreadStore {
                     batch_start,
                     offset,
                     /*initial_ordinal*/ 0,
+                    file_identity,
                     std::mem::take(&mut batch),
                 )
                 .await?;
@@ -1196,6 +1211,7 @@ impl LocalThreadStore {
                 batch_start,
                 offset,
                 /*initial_ordinal*/ 0,
+                file_identity,
                 batch,
             )
             .await?;

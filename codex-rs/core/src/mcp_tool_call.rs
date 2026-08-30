@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::io;
+use std::io::Write;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -937,42 +939,51 @@ fn truncate_mcp_tool_result_for_event(
 ) -> Result<CallToolResult, String> {
     match result {
         Ok(call_tool_result) => {
+            let mut counter = SizeLimitWriter::new(MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES);
+            if serde_json::to_writer(&mut counter, call_tool_result).is_err() {
+                return Ok(CallToolResult {
+                    content: vec![serde_json::json!({
+                        "type": "text",
+                        "text": "[oversized MCP result omitted from history]",
+                    })],
+                    structured_content: None,
+                    is_error: call_tool_result.is_error,
+                    meta: None,
+                });
+            }
+            let call_tool_result = call_tool_result.without_inline_media();
             // The app-server rebuilds `ThreadItem::McpToolCall` from this item,
             // so avoid persisting multi-megabyte results in rollout storage.
-            let Ok(serialized) = serde_json::to_string(call_tool_result) else {
-                return Ok(call_tool_result.clone());
-            };
-            if serialized.len() <= MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES {
-                return Ok(call_tool_result.clone());
-            }
-
-            // A huge MCP result can put bytes in `content`, `structuredContent`,
-            // or `_meta`. Collapse the event copy to a text preview of the whole
-            // serialized result so the UI still has useful context without
-            // preserving a multi-megabyte structured payload.
-            //
-            // This budget applies to the preview text, not the final event JSON.
-            // The preview is itself serialized into a JSON string, so quotes and
-            // backslashes can be escaped again and the stored event may end up
-            // somewhat larger than this byte budget.
-            let truncated = truncate_text(
-                &serialized,
-                TruncationPolicy::Bytes(MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES),
-            );
-            Ok(CallToolResult {
-                content: vec![serde_json::json!({
-                    "type": "text",
-                    "text": truncated,
-                })],
-                structured_content: None,
-                is_error: call_tool_result.is_error,
-                meta: None,
-            })
+            Ok(call_tool_result)
         }
         Err(message) => Err(truncate_text(
             message,
             TruncationPolicy::Bytes(MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES),
         )),
+    }
+}
+
+struct SizeLimitWriter {
+    remaining: usize,
+}
+
+impl SizeLimitWriter {
+    fn new(limit: usize) -> Self {
+        Self { remaining: limit }
+    }
+}
+
+impl Write for SizeLimitWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.len() > self.remaining {
+            return Err(io::Error::other("MCP result exceeds event limit"));
+        }
+        self.remaining -= buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 

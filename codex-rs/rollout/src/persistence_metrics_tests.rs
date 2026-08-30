@@ -243,6 +243,31 @@ fn turn_measurements_span_batches_and_include_items_before_start() {
 }
 
 #[test]
+fn turn_measurement_uses_sanitized_post_filter_size() {
+    let image = RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+        ResponseItem::ImageGenerationCall {
+            id: None,
+            status: "completed".to_string(),
+            revised_prompt: None,
+            result: "large-base64-result".repeat(100),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ));
+    let items = vec![turn_started("turn-1"), image, turn_complete("turn-1")];
+    let (_, expected) = measure_and_filter_rollout_items(&items, ThreadHistoryMode::Legacy);
+
+    let update = update_for_batch(&mut TurnMeasurementState::default(), &items);
+
+    assert_eq!(update.completed.len(), 1);
+    assert_eq!(update.completed[0].totals.pre_filter, expected.pre_filter);
+    assert_eq!(update.completed[0].totals.post_filter, expected.post_filter);
+    assert!(
+        update.completed[0].totals.post_filter.payload_bytes
+            < update.completed[0].totals.pre_filter.payload_bytes
+    );
+}
+
+#[test]
 fn invalid_turn_boundaries_reset_partial_measurements() {
     let mut state = TurnMeasurementState::default();
     let unmatched_completion = vec![retained_message("orphan"), turn_complete("turn-1")];

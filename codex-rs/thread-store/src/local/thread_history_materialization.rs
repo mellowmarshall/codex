@@ -12,6 +12,7 @@ use tracing::warn;
 
 use super::LocalThreadStore;
 use super::thread_history::ProjectedRolloutLine;
+use super::thread_history::RolloutFileIdentity;
 use super::thread_history::RolloutProjectionState;
 use super::thread_history::RolloutProjectionStep;
 use crate::ThreadStoreError;
@@ -40,8 +41,9 @@ pub(super) async fn materialize_to_sqlite(
         Err(err) => return Err(thread_store_io_error(err)),
     };
     let mut projection_state = super::thread_history::projection_state(store, thread_id).await?;
+    let file_identity = rollout_file_identity(rollout_path).await?;
     if let Some(state) = projection_state.as_ref()
-        && !projection_checkpoint_matches_rollout(&mut file, state).await?
+        && !projection_checkpoint_matches_rollout(&mut file, file_identity, state).await?
     {
         warn!(
             thread_id = %thread_id,
@@ -88,6 +90,7 @@ pub(super) async fn materialize_to_sqlite(
             start_offset,
             next_offset,
             initial_ordinal,
+            file_identity,
             projections,
         )
         .await?;
@@ -98,9 +101,13 @@ pub(super) async fn materialize_to_sqlite(
 
 async fn projection_checkpoint_matches_rollout(
     file: &mut tokio::fs::File,
+    current_identity: RolloutFileIdentity,
     state: &RolloutProjectionState,
 ) -> ThreadStoreResult<bool> {
     let file_len = file.metadata().await.map_err(thread_store_io_error)?.len();
+    if current_identity.device_id.is_some() && state.file_identity != current_identity {
+        return Ok(false);
+    }
     if state.next_byte_offset > file_len {
         return Ok(false);
     }
@@ -141,6 +148,33 @@ async fn projection_checkpoint_matches_rollout(
         return Ok(true);
     };
     Ok(ordinal == state.next_ordinal || ordinal.checked_add(1) == Some(state.next_ordinal))
+}
+
+pub(super) async fn rollout_file_identity(
+    rollout_path: &Path,
+) -> ThreadStoreResult<RolloutFileIdentity> {
+    let path = codex_rollout::existing_rollout_path(rollout_path)
+        .await
+        .unwrap_or_else(|| rollout_path.to_path_buf());
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(thread_store_io_error)?;
+    Ok(rollout_file_identity_from_metadata(&metadata))
+}
+
+#[cfg(unix)]
+fn rollout_file_identity_from_metadata(metadata: &std::fs::Metadata) -> RolloutFileIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    RolloutFileIdentity {
+        device_id: Some(metadata.dev() as i64),
+        inode: Some(metadata.ino() as i64),
+    }
+}
+
+#[cfg(not(unix))]
+fn rollout_file_identity_from_metadata(_metadata: &std::fs::Metadata) -> RolloutFileIdentity {
+    RolloutFileIdentity::default()
 }
 
 fn paginated_record_prefix_ordinal(prefix: &[u8]) -> Option<u64> {

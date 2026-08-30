@@ -275,6 +275,77 @@ pub struct CallToolResult {
     pub meta: Option<serde_json::Value>,
 }
 
+impl CallToolResult {
+    /// Return the UI/history copy of an MCP result without inline media bytes.
+    ///
+    /// The model-facing result remains unchanged. This projection removes standard MCP image,
+    /// audio, and blob resource blocks before event truncation can flatten them into text.
+    pub fn without_inline_media(&self) -> Self {
+        Self {
+            content: self
+                .content
+                .iter()
+                .map(clone_mcp_value_without_inline_media)
+                .collect(),
+            structured_content: self
+                .structured_content
+                .as_ref()
+                .map(clone_mcp_value_without_inline_media),
+            is_error: self.is_error,
+            meta: self.meta.as_ref().map(clone_mcp_value_without_inline_media),
+        }
+    }
+}
+
+fn clone_mcp_value_without_inline_media(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(value) if has_data_scheme(value) => {
+            serde_json::Value::String("[inline MCP media omitted from history]".to_string())
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .map(clone_mcp_value_without_inline_media)
+                .collect(),
+        ),
+        serde_json::Value::Object(object)
+            if matches!(
+                object.get("type").and_then(serde_json::Value::as_str),
+                Some("image" | "audio")
+            ) =>
+        {
+            serde_json::json!({
+                "type": "text",
+                "text": "[inline MCP media omitted from history]",
+            })
+        }
+        serde_json::Value::Object(object)
+            if object
+                .get("resource")
+                .and_then(|resource| resource.get("blob"))
+                .is_some() =>
+        {
+            serde_json::json!({
+                "type": "text",
+                "text": "[inline MCP resource blob omitted from history]",
+            })
+        }
+        serde_json::Value::Object(object) => serde_json::Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), clone_mcp_value_without_inline_media(value)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn has_data_scheme(value: &str) -> bool {
+    value
+        .get(.."data:".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+}
+
 // === Adapter helpers ===
 //
 // These types and conversions intentionally live in `codex-protocol` so other crates can convert

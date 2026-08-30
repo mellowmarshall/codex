@@ -49,6 +49,13 @@ pub(super) enum RolloutProjectionStep {
 pub(super) struct RolloutProjectionState {
     pub next_byte_offset: u64,
     pub next_ordinal: u64,
+    pub file_identity: RolloutFileIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct RolloutFileIdentity {
+    pub device_id: Option<i64>,
+    pub inode: Option<i64>,
 }
 
 pub(super) async fn projection_state(
@@ -67,9 +74,9 @@ pub(super) async fn projection_state(
     }
 
     let pool = store.thread_history_db().await?;
-    let state = sqlx::query_as::<_, (i64, i64)>(
+    let state = sqlx::query_as::<_, (i64, i64, Option<i64>, Option<i64>)>(
         r#"
-SELECT next_rollout_byte_offset, next_rollout_ordinal
+SELECT next_rollout_byte_offset, next_rollout_ordinal, rollout_device_id, rollout_inode
 FROM thread_history_projection_state
 WHERE thread_id = ?
         "#,
@@ -79,7 +86,7 @@ WHERE thread_id = ?
     .await
     .map_err(thread_history_error)?;
     state
-        .map(|(next_byte_offset, next_ordinal)| {
+        .map(|(next_byte_offset, next_ordinal, device_id, inode)| {
             Ok(RolloutProjectionState {
                 next_byte_offset: u64::try_from(next_byte_offset).map_err(|_| {
                     ThreadStoreError::Internal {
@@ -95,6 +102,7 @@ WHERE thread_id = ?
                         ),
                     }
                 })?,
+                file_identity: RolloutFileIdentity { device_id, inode },
             })
         })
         .transpose()
@@ -106,6 +114,7 @@ pub(super) async fn apply_projection(
     start_offset: u64,
     next_offset: u64,
     initial_ordinal: u64,
+    file_identity: RolloutFileIdentity,
     projections: Vec<RolloutProjectionStep>,
 ) -> ThreadStoreResult<()> {
     let pool = store.thread_history_db().await?;
@@ -225,16 +234,22 @@ ON CONFLICT(thread_id, item_id) DO NOTHING
 INSERT INTO thread_history_projection_state (
     thread_id,
     next_rollout_byte_offset,
-    next_rollout_ordinal
-) VALUES (?, ?, ?)
+    next_rollout_ordinal,
+    rollout_device_id,
+    rollout_inode
+) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(thread_id) DO UPDATE SET
     next_rollout_byte_offset = excluded.next_rollout_byte_offset,
-    next_rollout_ordinal = excluded.next_rollout_ordinal
+    next_rollout_ordinal = excluded.next_rollout_ordinal,
+    rollout_device_id = excluded.rollout_device_id,
+    rollout_inode = excluded.rollout_inode
         "#,
     )
     .bind(thread_id.as_str())
     .bind(sqlite_integer(next_offset, "rollout byte offset")?)
     .bind(next_ordinal)
+    .bind(file_identity.device_id)
+    .bind(file_identity.inode)
     .execute(&mut *transaction)
     .await
     .map_err(thread_history_error)?;
@@ -283,6 +298,28 @@ pub(super) async fn delete_thread(
         .commit()
         .await
         .map_err(thread_history_delete_error)
+}
+
+pub(super) async fn update_projection_file_identity(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    file_identity: RolloutFileIdentity,
+) -> ThreadStoreResult<()> {
+    let pool = store.thread_history_db().await?;
+    sqlx::query(
+        r#"
+UPDATE thread_history_projection_state
+SET rollout_device_id = ?, rollout_inode = ?
+WHERE thread_id = ?
+        "#,
+    )
+    .bind(file_identity.device_id)
+    .bind(file_identity.inode)
+    .bind(thread_id.to_string())
+    .execute(pool)
+    .await
+    .map_err(thread_history_error)?;
+    Ok(())
 }
 
 async fn apply_change_set(
