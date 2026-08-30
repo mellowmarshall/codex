@@ -6,6 +6,7 @@ use codex_extension_items::ExtensionItem;
 use codex_extension_items::image_generation::ImageGenerationItem as ExtensionImageGenerationItem;
 use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
 use codex_protocol::items::DynamicToolCallItem;
+use codex_protocol::items::FunctionCallOutputItem;
 use codex_protocol::items::ImageGenerationItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -151,16 +152,22 @@ fn clone_output_without_inline_media(
     output: &FunctionCallOutputPayload,
 ) -> FunctionCallOutputPayload {
     FunctionCallOutputPayload {
-        body: match &output.body {
-            FunctionCallOutputBody::Text(text) => FunctionCallOutputBody::Text(text.clone()),
-            FunctionCallOutputBody::ContentItems(items) => FunctionCallOutputBody::ContentItems(
-                items
-                    .iter()
-                    .map(clone_function_output_item_without_inline_media)
-                    .collect(),
-            ),
-        },
+        body: clone_output_body_without_inline_media(&output.body),
         success: output.success,
+    }
+}
+
+fn clone_output_body_without_inline_media(
+    output: &FunctionCallOutputBody,
+) -> FunctionCallOutputBody {
+    match output {
+        FunctionCallOutputBody::Text(text) => FunctionCallOutputBody::Text(text.clone()),
+        FunctionCallOutputBody::ContentItems(items) => FunctionCallOutputBody::ContentItems(
+            items
+                .iter()
+                .map(clone_function_output_item_without_inline_media)
+                .collect(),
+        ),
     }
 }
 
@@ -221,6 +228,7 @@ fn clone_turn_item_without_inline_media(item: &TurnItem) -> TurnItem {
                 transparent_background: image.transparent_background,
                 failure: image.failure.clone(),
                 saved_path: image.saved_path.clone(),
+                imagegen_request_id: image.imagegen_request_id.clone(),
             }),
         ),
         TurnItem::ImageGeneration(image) => TurnItem::ImageGeneration(ImageGenerationItem {
@@ -246,6 +254,14 @@ fn clone_turn_item_without_inline_media(item: &TurnItem) -> TurnItem {
             error: item.error.clone(),
             duration: item.duration,
         }),
+        TurnItem::FunctionCallOutput(item) => {
+            TurnItem::FunctionCallOutput(FunctionCallOutputItem {
+                id: item.id.clone(),
+                name: item.name.clone(),
+                namespace: item.namespace.clone(),
+                output: clone_output_body_without_inline_media(&item.output),
+            })
+        }
         _ => item.clone(),
     }
 }

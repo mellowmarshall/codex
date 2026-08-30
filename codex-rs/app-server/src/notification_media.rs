@@ -3,6 +3,7 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ResponseItem;
 
@@ -26,14 +27,7 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
                 }
                 ResponseItem::FunctionCallOutput { output, .. }
                 | ResponseItem::CustomToolCallOutput { output, .. } => {
-                    if let Some(items) = output.content_items_mut() {
-                        items.retain(|item| match item {
-                            FunctionCallOutputContentItem::InputImage { .. }
-                            | FunctionCallOutputContentItem::InputAudio { .. } => false,
-                            FunctionCallOutputContentItem::InputText { .. }
-                            | FunctionCallOutputContentItem::EncryptedContent { .. } => true,
-                        });
-                    }
+                    without_function_output_media(&mut output.body);
                 }
                 ResponseItem::ImageGenerationCall { result, .. } => result.clear(),
                 ResponseItem::AdditionalTools { .. }
@@ -172,6 +166,9 @@ fn without_thread_item_media(mut item: ThreadItem) -> ThreadItem {
             });
         }
         ThreadItem::ImageGeneration(item) => item.result.clear(),
+        ThreadItem::FunctionCallOutput { output, .. } => {
+            without_function_output_media(output);
+        }
         ThreadItem::HookPrompt { .. }
         | ThreadItem::AgentMessage { .. }
         | ThreadItem::Plan { .. }
@@ -193,6 +190,18 @@ fn without_thread_item_media(mut item: ThreadItem) -> ThreadItem {
         | ThreadItem::ContextCompaction { .. } => {}
     }
     item
+}
+
+fn without_function_output_media(output: &mut FunctionCallOutputBody) {
+    let FunctionCallOutputBody::ContentItems(items) = output else {
+        return;
+    };
+    items.retain(|item| match item {
+        FunctionCallOutputContentItem::InputImage { .. }
+        | FunctionCallOutputContentItem::InputAudio { .. } => false,
+        FunctionCallOutputContentItem::InputText { .. }
+        | FunctionCallOutputContentItem::EncryptedContent { .. } => true,
+    });
 }
 
 #[cfg(test)]
