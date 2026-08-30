@@ -12,6 +12,7 @@ use tracing::warn;
 
 use super::LocalThreadStore;
 use super::thread_history::ProjectedRolloutLine;
+use super::thread_history::RolloutFileIdentity;
 use super::thread_history::RolloutProjectionState;
 use super::thread_history::RolloutProjectionStep;
 use crate::ThreadStoreError;
@@ -28,6 +29,13 @@ pub(super) async fn materialize_to_sqlite(
         return Ok(());
     }
     let mut projection_state = super::thread_history::projection_state(store, thread_id).await?;
+    let rollout_exists = tokio::fs::try_exists(rollout_path)
+        .await
+        .map_err(thread_store_io_error)?;
+    if projection_state.is_none() && !rollout_exists {
+        return Ok(());
+    }
+    let file_identity = rollout_file_identity(rollout_path).await?;
     if let Some(state) = projection_state.as_ref()
         && !projection_checkpoint_matches_rollout(rollout_path, state).await?
     {
@@ -45,13 +53,6 @@ pub(super) async fn materialize_to_sqlite(
     let mut start_offset = projection_state
         .as_ref()
         .map_or(0, |state| state.next_byte_offset);
-    if projection_state.is_none()
-        && !tokio::fs::try_exists(rollout_path)
-            .await
-            .map_err(thread_store_io_error)?
-    {
-        return Ok(());
-    }
     let session_meta = codex_rollout::read_session_meta_line(rollout_path)
         .await
         .map_err(thread_store_io_error)?
@@ -82,6 +83,7 @@ pub(super) async fn materialize_to_sqlite(
             start_offset,
             next_offset,
             initial_ordinal,
+            file_identity,
             projections,
         )
         .await?;
@@ -94,10 +96,14 @@ async fn projection_checkpoint_matches_rollout(
     rollout_path: &Path,
     state: &RolloutProjectionState,
 ) -> ThreadStoreResult<bool> {
-    let file_len = tokio::fs::metadata(rollout_path)
+    let metadata = tokio::fs::metadata(rollout_path)
         .await
-        .map_err(thread_store_io_error)?
-        .len();
+        .map_err(thread_store_io_error)?;
+    let file_len = metadata.len();
+    let current_identity = rollout_file_identity_from_metadata(&metadata);
+    if current_identity.device_id.is_some() && state.file_identity != current_identity {
+        return Ok(false);
+    }
     if state.next_byte_offset > file_len {
         return Ok(false);
     }
@@ -141,6 +147,30 @@ async fn projection_checkpoint_matches_rollout(
         return Ok(true);
     };
     Ok(ordinal == state.next_ordinal || ordinal.checked_add(1) == Some(state.next_ordinal))
+}
+
+pub(super) async fn rollout_file_identity(
+    rollout_path: &Path,
+) -> ThreadStoreResult<RolloutFileIdentity> {
+    let metadata = tokio::fs::metadata(rollout_path)
+        .await
+        .map_err(thread_store_io_error)?;
+    Ok(rollout_file_identity_from_metadata(&metadata))
+}
+
+#[cfg(unix)]
+fn rollout_file_identity_from_metadata(metadata: &std::fs::Metadata) -> RolloutFileIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    RolloutFileIdentity {
+        device_id: Some(metadata.dev() as i64),
+        inode: Some(metadata.ino() as i64),
+    }
+}
+
+#[cfg(not(unix))]
+fn rollout_file_identity_from_metadata(_metadata: &std::fs::Metadata) -> RolloutFileIdentity {
+    RolloutFileIdentity::default()
 }
 
 fn paginated_record_prefix_ordinal(prefix: &[u8]) -> Option<u64> {

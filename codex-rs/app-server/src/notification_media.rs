@@ -153,18 +153,18 @@ fn without_thread_item_media(mut item: ThreadItem) -> ThreadItem {
             result: Some(result),
             ..
         } => {
-            // TODO(ruslan): Handle oversized results that core has already collapsed into a
-            // truncated text preview, which can contain inline media that this filter retains.
-            result.content.retain(|item| {
-                !matches!(
-                    item.get("type").and_then(serde_json::Value::as_str),
-                    Some("image" | "audio")
-                ) && item
-                    .get("resource")
-                    .and_then(|resource| resource.get("blob"))
-                    .is_none()
-            });
+            let media_free = codex_protocol::mcp::CallToolResult {
+                content: result.content.clone(),
+                structured_content: result.structured_content.clone(),
+                is_error: None,
+                meta: result.meta.clone(),
+            }
+            .without_inline_media();
+            result.content = media_free.content;
+            result.structured_content = media_free.structured_content;
+            result.meta = media_free.meta;
         }
+        ThreadItem::WebSearch(item) => *item = item.without_inline_media(),
         ThreadItem::ImageGeneration(item) => item.result.clear(),
         ThreadItem::FunctionCallOutput { output, .. } => {
             without_function_output_media(output);
@@ -182,7 +182,6 @@ fn without_thread_item_media(mut item: ThreadItem) -> ThreadItem {
         }
         | ThreadItem::CollabAgentToolCall { .. }
         | ThreadItem::SubAgentActivity { .. }
-        | ThreadItem::WebSearch(_)
         | ThreadItem::ImageView { .. }
         | ThreadItem::Sleep(_)
         | ThreadItem::EnteredReviewMode { .. }

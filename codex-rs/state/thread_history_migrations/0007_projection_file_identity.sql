@@ -1,0 +1,2 @@
+ALTER TABLE thread_history_projection_state ADD COLUMN rollout_device_id INTEGER;
+ALTER TABLE thread_history_projection_state ADD COLUMN rollout_inode INTEGER;

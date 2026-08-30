@@ -6,6 +6,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutPersistenceTelemetry;
+use codex_rollout::is_persisted_rollout_item;
 use codex_rollout::measure_and_filter_rollout_items;
 use codex_rollout::persisted_rollout_items;
 use tokio::sync::Mutex;
@@ -117,8 +118,10 @@ impl LiveThread {
         mut params: CreateThreadParams,
         inherited_model_context: &[RolloutItem],
     ) -> ThreadStoreResult<Self> {
-        let persisted_prefix_item_count =
-            persisted_rollout_items(inherited_model_context, params.history_mode).len();
+        let persisted_prefix_item_count = inherited_model_context
+            .iter()
+            .filter(|item| is_persisted_rollout_item(item, params.history_mode))
+            .count();
         params.subagent_history_start_ordinal = Some(
             u64::try_from(persisted_prefix_item_count)
                 .map_err(|_| ThreadStoreError::Internal {

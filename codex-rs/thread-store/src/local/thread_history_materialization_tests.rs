@@ -2045,6 +2045,25 @@ async fn catch_up_rebuilds_projection_after_rollout_replacement() {
         .live_rollout_path(thread_id)
         .await
         .expect("rollout path");
+    sqlx::query(
+        "UPDATE thread_history_projection_state SET rollout_device_id = NULL, rollout_inode = NULL WHERE thread_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("simulate projection checkpoint from before identity migration");
+    super::materialize_to_sqlite(&store, thread_id, rollout_path.as_path())
+        .await
+        .expect("backfill projection identity at end of rollout");
+    let identity = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+        "SELECT rollout_device_id, rollout_inode FROM thread_history_projection_state WHERE thread_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("read backfilled projection identity");
+    assert!(identity.0.is_some());
+    assert!(identity.1.is_some());
     let original = fs::read_to_string(&rollout_path).expect("read original rollout");
     let session_meta = original.lines().next().expect("session metadata line");
     let replacement = format!("{session_meta}\n");
@@ -2070,6 +2089,56 @@ SELECT
     .await
     .expect("read rebuilt projection row counts");
     assert_eq!(counts, (0, 0));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn catch_up_rebuilds_projection_after_equal_length_atomic_replacement() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![turn_started("stale-turn"), user_message("stale payload")],
+        })
+        .await
+        .expect("append stale projection rows");
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("rollout path");
+    let original = fs::read_to_string(&rollout_path).expect("read original rollout");
+    let replacement = original
+        .replace("stale-turn", "fresh-turn")
+        .replace("stale payload", "fresh payload");
+    assert_eq!(replacement.len(), original.len());
+    let replacement_path = rollout_path.with_extension("replacement");
+    fs::write(&replacement_path, replacement.as_bytes()).expect("write staged replacement");
+    fs::rename(&replacement_path, &rollout_path).expect("publish replacement atomically");
+
+    super::materialize_to_sqlite(&store, thread_id, rollout_path.as_path())
+        .await
+        .expect("rebuild projection from equal-length replacement rollout");
+
+    let turns = sqlx::query_as::<_, (String, String)>(
+        "SELECT turn_id, status FROM thread_turns WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read rebuilt projection turns");
+    assert_eq!(
+        turns,
+        vec![("fresh-turn".to_string(), "inProgress".to_string())]
+    );
 }
 
 #[tokio::test]

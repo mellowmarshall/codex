@@ -350,7 +350,6 @@ async fn migration_publishes_canonical_projected_history_and_is_idempotent() {
     let turns = list_active_summary_turns(&store, thread_id).await;
     assert_eq!(turns.turns.len(), 1);
     assert_eq!(turns.turns[0].items.len(), 2);
-
     let bytes = fs::read(&path).expect("read first migration");
     let second = store
         .migrate_rollouts(apply_options())
@@ -1725,6 +1724,17 @@ async fn migration_preserves_compressed_rollouts_during_publish_and_recovery() {
     let turns = list_active_summary_turns(&store, thread_id).await;
     assert_eq!(turns.turns.len(), 1);
     assert_eq!(turns.turns[0].items.len(), 2);
+    #[cfg(unix)]
+    assert_eq!(
+        thread_history::projection_state(&store, thread_id)
+            .await
+            .expect("read compressed projection")
+            .expect("compressed projection exists")
+            .file_identity,
+        super::super::thread_history_materialization::rollout_file_identity(&compressed_path)
+            .await
+            .expect("read published compressed identity")
+    );
 
     thread_history::delete_thread(&store, thread_id)
         .await
@@ -2225,6 +2235,13 @@ async fn migration_recovers_a_compressed_published_rollout() {
         zstd::stream::decode_all(fs::File::open(&compressed_path).expect("open rollout"))
             .expect("decompress rollout")
             .len() as u64
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        projection.file_identity,
+        super::super::thread_history_materialization::rollout_file_identity(&compressed_path)
+            .await
+            .expect("read recovered compressed identity")
     );
 }
 
