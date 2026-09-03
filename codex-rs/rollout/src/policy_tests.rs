@@ -366,17 +366,24 @@ fn persisted_compaction_replaces_nested_inline_user_media() {
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         })]),
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: Some("response-1".to_string()),
+        latest_token_usage_record: None,
     });
 
     let persisted = persisted_rollout_items(&[item], ThreadHistoryMode::Paginated);
     let RolloutItem::Compacted(compacted) = &persisted[0] else {
         panic!("expected compacted item");
     };
+    assert_eq!(
+        compacted.compaction_response_id.as_deref(),
+        Some("response-1")
+    );
     let ResponseItem::Message { content, .. } =
         &compacted.replacement_history.as_ref().unwrap()[0].item
     else {
@@ -590,11 +597,14 @@ fn persisted_compaction_drops_nested_inline_image_result() {
         replacement_history: Some(vec![ResponseItemEnvelope::new(image_generation_response(
             "copied-base64-result",
         ))]),
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     });
 
     let persisted = persisted_rollout_items(&[item], ThreadHistoryMode::Paginated);

@@ -2052,6 +2052,7 @@ async fn catch_up_projects_large_suffix_in_bounded_batches() {
             phase: Some(MessagePhase::Commentary),
             memory_citation: None,
             delivery: None,
+            questions: None,
         });
         suffix.push_str(&rollout_line(
             Some(ordinal),

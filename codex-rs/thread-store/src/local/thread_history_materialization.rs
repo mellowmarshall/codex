@@ -28,20 +28,26 @@ pub(super) async fn materialize_to_sqlite(
     if store.state_db.is_none() {
         return Ok(());
     }
-    let path = rollout_path.to_path_buf();
+    let mut projection_state = super::thread_history::projection_state(store, thread_id).await?;
+    let Some(existing_rollout_path) = codex_rollout::existing_rollout_path(rollout_path).await
+    else {
+        if projection_state.is_none() {
+            return Ok(());
+        }
+        return Err(thread_store_io_error(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("rollout not found: {}", rollout_path.display()),
+        )));
+    };
+    let path = existing_rollout_path.clone();
     let file =
         tokio::task::spawn_blocking(move || codex_rollout::open_rollout_seekable_reader(&path))
             .await
             .map_err(|err| ThreadStoreError::Internal {
                 message: format!("failed to join rollout projection read: {err}"),
             })?;
-    let mut file = match file {
-        Ok(file) => tokio::fs::File::from_std(file),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(thread_store_io_error(err)),
-    };
-    let mut projection_state = super::thread_history::projection_state(store, thread_id).await?;
-    let file_identity = rollout_file_identity(rollout_path).await?;
+    let mut file = tokio::fs::File::from_std(file.map_err(thread_store_io_error)?);
+    let file_identity = rollout_file_identity(&existing_rollout_path).await?;
     if let Some(state) = projection_state.as_ref()
         && !projection_checkpoint_matches_rollout(&mut file, file_identity, state).await?
     {
@@ -59,7 +65,7 @@ pub(super) async fn materialize_to_sqlite(
     let mut start_offset = projection_state
         .as_ref()
         .map_or(0, |state| state.next_byte_offset);
-    let session_meta = codex_rollout::read_session_meta_line(rollout_path)
+    let session_meta = codex_rollout::read_session_meta_line(&existing_rollout_path)
         .await
         .map_err(thread_store_io_error)?
         .meta;

@@ -92,11 +92,14 @@ fn clone_without_inline_media_payloads(item: &RolloutItem) -> RolloutItem {
                     .map(clone_response_envelope_without_inline_media)
                     .collect()
             }),
+            guardian_history: compacted.guardian_history.clone(),
             mcp_resource_origins: compacted.mcp_resource_origins.clone(),
             window_number: compacted.window_number,
             first_window_id: compacted.first_window_id.clone(),
             previous_window_id: compacted.previous_window_id.clone(),
             window_id: compacted.window_id.clone(),
+            compaction_response_id: compacted.compaction_response_id.clone(),
+            latest_token_usage_record: compacted.latest_token_usage_record.clone(),
         }),
         RolloutItem::EventMsg(event) => {
             RolloutItem::EventMsg(clone_event_without_inline_media(event))
