@@ -218,3 +218,77 @@ fn thread_event_store_coalesces_only_adjacent_matching_agent_message_deltas() {
     );
     assert!(store.has_pending_thread_approvals());
 }
+
+#[test]
+fn command_working_directory_survives_eviction_and_is_isolated_by_thread() {
+    use codex_app_server_protocol::CommandExecutionSource;
+    use codex_app_server_protocol::CommandExecutionStatus;
+    use codex_app_server_protocol::ItemCompletedNotification;
+    use codex_app_server_protocol::ItemStartedNotification;
+    use codex_app_server_protocol::ThreadItem;
+    use codex_utils_path_uri::LegacyAppPathString;
+
+    let first_id = ThreadId::new();
+    let second_id = ThreadId::new();
+    let mut first = ThreadEventStore::new(/*capacity*/ 1);
+    let mut second = ThreadEventStore::new(/*capacity*/ 1);
+    let alpha = test_path_buf("/worktrees/alpha");
+    let beta = test_path_buf("/worktrees/beta");
+    let item = |id: &str, cwd: &std::path::Path| ThreadItem::CommandExecution {
+        id: id.to_string(),
+        command: "pwd".to_string(),
+        cwd: LegacyAppPathString::from_path(cwd),
+        plugin_id: None,
+        script_path: None,
+        process_id: None,
+        source: CommandExecutionSource::UnifiedExecStartup,
+        status: CommandExecutionStatus::InProgress,
+        command_actions: Vec::new(),
+        aggregated_output: None,
+        exit_code: None,
+        duration_ms: None,
+    };
+    for (store, id, cwd) in [
+        (&mut first, first_id, &alpha),
+        (&mut second, second_id, &beta),
+    ] {
+        store.push_notification(ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: id.to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_ms: 0,
+            item: item("current", cwd),
+        }));
+        // This removes the start event from the bounded replay buffer.
+        store.push_notification(turn_started_notification(id, "turn-2"));
+    }
+    let mut older = item("older", &beta);
+    if let ThreadItem::CommandExecution { status, .. } = &mut older {
+        *status = CommandExecutionStatus::Completed;
+    }
+    first.push_notification(ServerNotification::ItemCompleted(
+        ItemCompletedNotification {
+            thread_id: first_id.to_string(),
+            turn_id: "turn-0".to_string(),
+            completed_at_ms: 1,
+            item: older,
+        },
+    ));
+    assert_eq!(first.snapshot().command_cwd, Some(alpha.clone()));
+    assert_eq!(second.snapshot().command_cwd, Some(beta.clone()));
+    let mut declined = item("declined", &beta);
+    if let ThreadItem::CommandExecution { status, .. } = &mut declined {
+        *status = CommandExecutionStatus::Declined;
+    }
+    first.set_turns(vec![Turn {
+        id: "turn-3".to_string(),
+        items_view: TurnItemsView::Full,
+        items: vec![item("executed", &alpha), declined],
+        status: TurnStatus::Completed,
+        error: None,
+        started_at: Some(0),
+        completed_at: Some(1),
+        duration_ms: Some(1),
+    }]);
+    assert_eq!(first.snapshot().command_cwd, Some(alpha));
+    assert_eq!(first.buffer.len(), 1);
+}

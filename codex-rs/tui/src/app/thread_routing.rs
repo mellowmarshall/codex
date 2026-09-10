@@ -1464,6 +1464,7 @@ impl App {
             let mut store = channel.store.lock().await;
             store.set_session(session.clone(), turns.clone());
             store.rebase_buffer_after_session_refresh();
+            snapshot.command_cwd.clone_from(&store.command_cwd);
         }
         snapshot.session = Some(session);
         snapshot.turns = turns;
@@ -1623,6 +1624,8 @@ impl App {
                 (event, _) => self.handle_thread_event_replay(event),
             }
         }
+        self.chat_widget
+            .restore_status_line_command_cwd(snapshot.command_cwd);
         if should_buffer_replay {
             self.app_event_tx
                 .send(AppEvent::EndInitialHistoryReplayBuffer);

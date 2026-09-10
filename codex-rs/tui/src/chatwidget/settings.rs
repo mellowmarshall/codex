@@ -507,6 +507,9 @@ impl ChatWidget {
 
     fn apply_thread_settings_cwd(&mut self, cwd: AbsolutePathBuf) {
         let previous_cwd = std::mem::replace(&mut self.config.cwd, cwd.clone());
+        if previous_cwd != cwd {
+            self.status_line_command_cwd = None;
+        }
         self.current_cwd = Some(cwd.to_path_buf());
         self.status_line_project_root_name_cache = None;
 
