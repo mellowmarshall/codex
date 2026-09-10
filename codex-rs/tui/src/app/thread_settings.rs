@@ -199,6 +199,13 @@ impl App {
 
         if let Some(channel) = self.thread_event_channels.get(&thread_id) {
             let mut store = channel.store.lock().await;
+            if store
+                .session
+                .as_ref()
+                .is_some_and(|session| session.cwd != settings.cwd)
+            {
+                store.command_cwd = None;
+            }
             if let Some(session) = store.session.as_mut() {
                 apply_thread_settings_to_session(session, settings);
             }

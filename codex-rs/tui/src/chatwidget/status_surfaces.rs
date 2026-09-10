@@ -449,9 +449,26 @@ impl ChatWidget {
     }
 
     fn status_line_cwd(&self) -> &Path {
-        self.current_cwd
+        self.status_line_command_cwd
             .as_deref()
+            .or(self.current_cwd.as_deref())
             .unwrap_or(self.config.cwd.as_path())
+    }
+
+    pub(super) fn update_status_line_command_cwd(&mut self, item: &ThreadItem) {
+        let Some(cwd) = crate::command_cwd::command_cwd(item) else {
+            return;
+        };
+        if self.status_line_command_cwd.as_ref() == Some(&cwd) {
+            return;
+        }
+        self.status_line_command_cwd = Some(cwd);
+        self.refresh_status_surfaces();
+        self.request_redraw();
+    }
+
+    pub(crate) fn restore_status_line_command_cwd(&mut self, cwd: Option<PathBuf>) {
+        self.status_line_command_cwd = cwd;
     }
 
     /// Resolves the project root associated with `cwd`.

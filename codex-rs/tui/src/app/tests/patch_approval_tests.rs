@@ -286,6 +286,7 @@ async fn replayed_patch_approval_pager_recovers_stored_turn_changes() {
     let cwd = app.chat_widget.config_ref().cwd.to_path_buf();
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            command_cwd: None,
             session: Some(test_thread_session(thread_id, cwd)),
             turns: vec![test_turn(
                 TURN_ID,

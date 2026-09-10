@@ -12,6 +12,15 @@ impl ChatWidget {
     /// avoid triggering side effects. Event ids are passed as `None` to
     /// distinguish replayed events from live ones.
     pub(crate) fn replay_thread_turns(&mut self, turns: Vec<Turn>, replay_kind: ReplayKind) {
+        // Resolve once before rendering; old turns must not fan out Git/PR lookups.
+        if let Some(cwd) = turns
+            .iter()
+            .flat_map(|turn| &turn.items)
+            .rev()
+            .find_map(crate::command_cwd::command_cwd)
+        {
+            self.status_line_command_cwd = Some(cwd);
+        }
         let hidden_nested_review_turns = std::iter::once(/*value*/ false)
             .chain(turns.windows(/*size*/ 2).map(|turns| {
                 crate::app_backtrack::is_hidden_nested_review_turn(&turns[0], &turns[1])
@@ -37,7 +46,11 @@ impl ChatWidget {
                 if hidden_nested_review_turn && matches!(item, ThreadItem::UserMessage { .. }) {
                     continue;
                 }
-                self.replay_thread_item(item, turn_id.clone(), replay_kind);
+                self.handle_thread_item(
+                    item,
+                    turn_id.clone(),
+                    ThreadItemRenderSource::Replay(replay_kind),
+                );
             }
             let status = if hidden_nested_review_turn {
                 TurnStatus::Completed
@@ -68,12 +81,16 @@ impl ChatWidget {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn replay_thread_item(
         &mut self,
         item: ThreadItem,
         turn_id: String,
         replay_kind: ReplayKind,
     ) {
+        if let Some(cwd) = crate::command_cwd::command_cwd(&item) {
+            self.status_line_command_cwd = Some(cwd);
+        }
         self.handle_thread_item(item, turn_id, ThreadItemRenderSource::Replay(replay_kind));
     }
 
