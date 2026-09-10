@@ -12,6 +12,7 @@ use std::borrow::Cow;
 pub(super) struct ThreadEventSnapshot {
     pub(super) session: Option<ThreadSessionState>,
     pub(super) turns: Vec<Turn>,
+    pub(super) command_cwd: Option<PathBuf>,
     pub(super) events: Vec<ThreadBufferedEvent>,
     pub(super) input_state: Option<ThreadInputState>,
 }
@@ -42,6 +43,7 @@ pub(super) enum ThreadEventAttachment {
 pub(super) struct ThreadEventStore {
     pub(super) session: Option<ThreadSessionState>,
     pub(super) turns: Vec<Turn>,
+    pub(super) command_cwd: Option<PathBuf>,
     pub(super) buffer: VecDeque<ThreadBufferedEvent>,
     pub(super) pending_interactive_replay: PendingInteractiveReplayState,
     pub(super) active_turn_id: Option<String>,
@@ -71,6 +73,7 @@ impl ThreadEventStore {
         Self {
             session: None,
             turns: Vec::new(),
+            command_cwd: None,
             buffer: VecDeque::new(),
             pending_interactive_replay: PendingInteractiveReplayState::default(),
             active_turn_id: None,
@@ -113,6 +116,11 @@ impl ThreadEventStore {
             .rev()
             .find(|turn| matches!(turn.status, TurnStatus::InProgress))
             .map(|turn| turn.id.clone());
+        self.command_cwd = turns
+            .iter()
+            .flat_map(|turn| &turn.items)
+            .rev()
+            .find_map(crate::command_cwd::command_cwd);
         self.turns = turns;
     }
 
@@ -128,6 +136,12 @@ impl ThreadEventStore {
         self.pending_interactive_replay
             .note_server_notification(notification.as_ref());
         match notification.as_ref() {
+            ServerNotification::ItemStarted(item) => {
+                if let Some(cwd) = crate::command_cwd::command_cwd(&item.item) {
+                    // Retain this beyond bounded event eviction for thread switches.
+                    self.command_cwd = Some(cwd);
+                }
+            }
             ServerNotification::TurnStarted(turn) => {
                 self.active_turn_id = Some(turn.turn.id.clone());
             }
@@ -210,6 +224,7 @@ impl ThreadEventStore {
         ThreadEventSnapshot {
             session: self.session.clone(),
             turns: self.turns.clone(),
+            command_cwd: self.command_cwd.clone(),
             // Thread switches replay buffered events into a rebuilt ChatWidget. Only replay
             // interactive prompts that are still pending, or answered approvals/input will reappear.
             events: self

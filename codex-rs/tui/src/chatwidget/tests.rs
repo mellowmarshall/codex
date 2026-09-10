@@ -258,6 +258,8 @@ mod slash_commands;
 mod status_and_layout;
 mod status_command_tests;
 mod status_surface_previews;
+#[path = "tests/status_working_directory_tests.rs"]
+mod status_working_directory_tests;
 mod terminal_title;
 mod usage;
 
